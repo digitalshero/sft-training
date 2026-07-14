@@ -1,0 +1,208 @@
+@import "tailwindcss" source(none);
+@source "../src";
+@import "tw-animate-css";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --radius-2xl: calc(var(--radius) + 8px);
+  --radius-3xl: calc(var(--radius) + 12px);
+
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-surface: var(--surface);
+  --color-surface-elevated: var(--surface-elevated);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent-soft: var(--accent-soft);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-success: var(--success);
+
+  --font-display: "Sora", system-ui, sans-serif;
+  --font-sans: "Inter", system-ui, sans-serif;
+
+  --shadow-glow: 0 0 60px -10px oklch(0.60 0.06 65 / 0.30);
+  --shadow-card: 0 8px 30px -10px oklch(0.30 0.04 70 / 0.18);
+  --shadow-elevated: 0 14px 40px -16px oklch(0.30 0.05 180 / 0.28), 0 2px 6px -2px oklch(0.30 0.05 180 / 0.10);
+
+  --color-shero-teal: var(--primary);
+  --color-shero-emerald: var(--shero-emerald);
+  --color-shero-gold: var(--shero-gold);
+  --color-shero-sand: var(--shero-sand);
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --color-chart-3: var(--chart-3);
+  --color-chart-4: var(--chart-4);
+  --color-chart-5: var(--chart-5);
+}
+
+:root {
+  --radius: 0.875rem;
+
+  /* Shero Teal — cream background with deep teal-green brand */
+  --background: oklch(0.975 0.008 80);
+  --foreground: oklch(0.22 0.02 200);
+
+  --surface: oklch(0.96 0.008 80);
+  --surface-elevated: oklch(0.99 0.006 85);
+
+  --card: oklch(0.99 0.006 85);
+  --card-foreground: oklch(0.22 0.02 200);
+
+  --popover: oklch(0.99 0.006 85);
+  --popover-foreground: oklch(0.22 0.02 200);
+
+  --primary: oklch(0.42 0.07 175);
+  --primary-foreground: oklch(0.98 0.01 85);
+
+  --secondary: oklch(0.93 0.02 180);
+  --secondary-foreground: oklch(0.28 0.04 185);
+
+  --muted: oklch(0.94 0.012 180);
+  --muted-foreground: oklch(0.48 0.02 200);
+
+  --accent: oklch(0.62 0.08 180);
+  --accent-foreground: oklch(0.22 0.04 190);
+  --accent-soft: oklch(0.62 0.08 180 / 0.18);
+
+  --destructive: oklch(0.58 0.20 25);
+  --destructive-foreground: oklch(0.98 0 0);
+
+  --success: oklch(0.62 0.10 165);
+
+  --border: oklch(0.72 0.03 185 / 0.45);
+  --input: oklch(0.93 0.015 180);
+  --ring: oklch(0.42 0.07 175);
+
+  --shero-emerald: oklch(0.52 0.12 165);
+  --shero-gold: oklch(0.78 0.12 85);
+  --shero-sand: oklch(0.94 0.02 85);
+
+  --chart-1: oklch(0.45 0.08 178);
+  --chart-2: oklch(0.55 0.13 165);
+  --chart-3: oklch(0.78 0.12 85);
+  --chart-4: oklch(0.70 0.02 200);
+  --chart-5: oklch(0.60 0.20 25);
+}
+
+@layer base {
+  * { border-color: var(--color-border); }
+  html { font-family: var(--font-sans); }
+  body {
+    background-color: var(--color-background);
+    color: var(--color-foreground);
+    background-image:
+      radial-gradient(ellipse 80% 60% at 20% 0%, oklch(0.85 0.05 180 / 0.35), transparent 60%),
+      radial-gradient(ellipse 60% 50% at 100% 20%, oklch(0.88 0.04 170 / 0.30), transparent 60%);
+    background-attachment: fixed;
+  }
+
+
+  h1, h2, h3, h4 { font-family: var(--font-display); letter-spacing: -0.02em; }
+}
+
+@layer utilities {
+  .gradient-text {
+    background: linear-gradient(135deg, oklch(0.40 0.07 175), oklch(0.55 0.09 180));
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+
+  .glow-ring {
+    box-shadow: 0 0 0 1px var(--color-border), var(--shadow-glow);
+  }
+  .card-surface {
+    background: linear-gradient(180deg, var(--color-surface-elevated), var(--color-surface));
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-2xl);
+  }
+}
+
+@layer components {
+  .input {
+    width: 100%;
+    border-radius: 0.5rem;
+    border: 1px solid var(--color-border);
+    background: var(--color-background);
+    padding: 0.5rem 0.75rem;
+    font-size: 0.875rem;
+    color: var(--color-foreground);
+  }
+  .input:focus { outline: none; border-color: var(--color-accent); }
+  .input:disabled { opacity: 0.6; cursor: not-allowed; }
+}
+
+@media print {
+  @page { size: A4 portrait; margin: 6mm; }
+  html, body { background: white !important; }
+  body * { visibility: hidden !important; }
+  .crc-print, .crc-print * { visibility: visible !important; }
+  .crc-print {
+    position: absolute !important;
+    left: 0; top: 0;
+    width: 297mm !important;        /* lay out at a wider canvas… */
+    transform: scale(0.66);          /* …then shrink to fit A4 width */
+    transform-origin: top left;
+    padding: 0 !important;
+    margin: 0 !important;
+    color: #000 !important;
+    background: white !important;
+    font-size: 9pt;
+    line-height: 1.25 !important;
+  }
+  .crc-print * {
+    color: #000 !important;
+    background: transparent !important;
+    box-shadow: none !important;
+    border-color: #999 !important;
+  }
+  /* Force multi-column grids to stay multi-column when printed */
+  .crc-print [class*="lg:grid-cols-"] { display: grid !important; }
+  .crc-print .lg\:grid-cols-2 { grid-template-columns: repeat(2, 1fr) !important; }
+  .crc-print .lg\:grid-cols-3 { grid-template-columns: repeat(3, 1fr) !important; }
+  .crc-print .lg\:grid-cols-4 { grid-template-columns: repeat(4, 1fr) !important; }
+  .crc-print .lg\:grid-cols-\[1\.1fr_1fr_0\.9fr\] { grid-template-columns: 1.1fr 1fr 0.9fr !important; }
+  .crc-print .lg\:grid-cols-\[1fr_320px\] { grid-template-columns: 1fr 260px !important; }
+  /* Compact spacing for print */
+  .crc-print .space-y-4 > * + * { margin-top: 0.4rem !important; }
+  .crc-print .space-y-3 > * + * { margin-top: 0.3rem !important; }
+  .crc-print .space-y-2 > * + * { margin-top: 0.2rem !important; }
+  .crc-print .gap-4 { gap: 0.4rem !important; }
+  .crc-print .gap-3 { gap: 0.3rem !important; }
+  .crc-print .p-6 { padding: 0.5rem !important; }
+  .crc-print .p-4 { padding: 0.4rem !important; }
+  .crc-print .p-3 { padding: 0.3rem !important; }
+  .crc-print .px-4 { padding-left: 0.4rem !important; padding-right: 0.4rem !important; }
+  .crc-print .py-3 { padding-top: 0.25rem !important; padding-bottom: 0.25rem !important; }
+  .crc-print .px-3 { padding-left: 0.3rem !important; padding-right: 0.3rem !important; }
+  .crc-print .py-2 { padding-top: 0.15rem !important; padding-bottom: 0.15rem !important; }
+  .crc-print table { font-size: 8pt !important; }
+  .crc-print h1 { font-size: 14pt !important; }
+  .crc-print h2 { font-size: 11pt !important; }
+  .crc-print h3, .crc-print h4 { font-size: 10pt !important; }
+  .crc-print img { max-height: 140px !important; width: auto !important; object-fit: cover !important; }
+  .crc-print svg { max-width: 100% !important; height: auto !important; }
+  .crc-print iframe, .crc-print video { display: none !important; }
+  .crc-print .overflow-x-auto { overflow: visible !important; }
+  .crc-print table { min-width: 0 !important; width: 100% !important; }
+  .no-print { display: none !important; }
+}

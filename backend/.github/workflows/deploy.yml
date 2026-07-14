@@ -1,0 +1,66 @@
+name: Deploy Shero Backend
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production
+
+    steps:
+      # ── Checkout ────────────────────────────────────────────────────────────
+      - uses: actions/checkout@v4
+
+      # ── Node setup ──────────────────────────────────────────────────────────
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      # ── Install & build ─────────────────────────────────────────────────────
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build TypeScript
+        run: npm run build
+
+      - name: Generate Prisma client
+        run: npx prisma generate
+
+      # ── Deploy to EC2 ────────────────────────────────────────────────────────
+      - name: Write SSH key
+        run: |
+          echo "${{ secrets.EC2_SSH_KEY }}" > /tmp/shero.pem
+          chmod 400 /tmp/shero.pem
+
+      - name: Sync files to EC2
+        run: |
+          rsync -az --delete \
+            --exclude 'node_modules' \
+            --exclude 'src' \
+            --exclude '.git' \
+            --exclude 'infra' \
+            -e "ssh -i /tmp/shero.pem -o StrictHostKeyChecking=no" \
+            ./ ubuntu@${{ secrets.EC2_HOST }}:/srv/shero-backend/
+
+      - name: Install prod deps & restart
+        run: |
+          ssh -i /tmp/shero.pem -o StrictHostKeyChecking=no ubuntu@${{ secrets.EC2_HOST }} << 'EOF'
+            set -e
+            export PATH="$HOME/.nvm/versions/node/$(ls ~/.nvm/versions/node | sort -V | tail -1)/bin:$PATH"
+            cd /srv/shero-backend
+            npm ci --omit=dev
+            npx prisma migrate deploy
+            pm2 reload shero-backend --update-env
+            pm2 save
+            echo "✅ Deploy complete"
+          EOF
+
+      # ── Smoke test ───────────────────────────────────────────────────────────
+      - name: Health check
+        run: |
+          sleep 5
+          curl -sf "https://${{ secrets.EC2_HOST }}/health" | jq .

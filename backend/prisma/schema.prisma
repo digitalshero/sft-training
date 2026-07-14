@@ -1,0 +1,1492 @@
+// =============================================================
+// Shero Training Centre — Prisma Schema
+// Mirrors the full Supabase PostgreSQL database schema.
+// Target: PostgreSQL (local dev) → AWS RDS PostgreSQL (prod)
+// =============================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─── Enums ────────────────────────────────────────────────────────────────────
+
+enum AppRole {
+  super_admin
+  admin
+  trainer
+  partner_lead
+  pse
+  kitchen_partner
+  inspector
+  partner
+}
+
+enum FcStatus {
+  active
+  inactive
+}
+
+enum FcCurrency {
+  inr
+  usd
+}
+
+enum FcCurrencyMode {
+  inr
+  usd
+  both
+}
+
+enum FcIngredientCategory {
+  grocery
+  vegetable
+  spice
+  oil
+  dairy
+  packing
+  other
+}
+
+enum FcPrepType {
+  base
+  paste
+  extract
+  seasoning
+  masala_mix
+  other
+  gravy_base
+  boiled_cooked
+  fried_roasted
+}
+
+enum FcRecipeStatus {
+  draft
+  submitted
+  change_pending_approval
+  approved
+  rejected
+}
+
+enum FcVersionStatus {
+  draft
+  submitted
+  approved
+  rejected
+  superseded
+}
+
+enum FcVegMode {
+  single
+  multi
+  mix
+  none
+}
+
+enum LpBookingStatus {
+  booked
+  passed
+  failed
+  reschedule
+  cancelled
+}
+
+enum LpEmailStatus {
+  pending
+  sent
+  failed
+}
+
+enum LpEnrolmentStatus {
+  active
+  completed
+  withdrawn
+}
+
+enum LpFinalDecision {
+  approved
+  rejected
+}
+
+enum LpFormStatus {
+  not_sent
+  pending
+  submitted
+}
+
+enum LpModuleType {
+  slides
+  video
+  reading
+  mixed
+}
+
+enum LpQuestionType {
+  single
+  multi
+  tf
+}
+
+enum LpSubmissionStatus {
+  pending
+  approved
+  redo
+  rejected
+}
+
+enum LpVisitStatus {
+  eligible
+  visitor_assigned
+  visit_scheduled
+  email_sent
+  visit_completed
+  approved
+  certified
+  rejected
+  waiting_admin_reschedule
+  rescheduled
+}
+
+enum KobStatus {
+  new_lead
+  language_assigned
+  first_call_pending
+  first_call_completed
+  webinar_invited
+  webinar_attended
+  webinar_missed
+  faq_pending
+  interested
+  not_interested
+  documents_pending
+  payment_pending
+  agreement_pending
+  agreement_signed
+  onboarding_approved
+  transferred_to_sft
+  hold
+  dropped
+  rejected
+}
+
+enum KobSource {
+  marketing
+  social_media
+  referral
+  website
+  field_team
+  whatsapp
+  inbound_call
+  other
+}
+
+enum BusinessModel {
+  branded
+  unbranded
+}
+
+enum PartnerType {
+  individual
+  commercial
+}
+
+enum FaqAudience {
+  kob_lead
+  sft_partner
+}
+
+enum LeCourseStatus {
+  draft
+  published
+  archived
+}
+
+enum LeCertStatus {
+  not_started
+  in_progress
+  checkpoint_failed
+  quiz_pending
+  practical_pending
+  approval_pending
+  certified
+  expired
+  retraining_required
+  revoked
+}
+
+enum LeQuestionKind {
+  single_choice
+  multi_choice
+  true_false
+  short_answer
+  image_choice
+  checklist
+}
+
+enum LeScopeType {
+  user
+  role
+  department
+  country
+  vertical
+  brand
+}
+
+enum LeSectionKind {
+  intro
+  text
+  graphic
+  screenshot
+  video
+  in_lesson_question
+  mini_quiz
+  practical_task
+  final_assessment
+}
+
+enum LeTaxonomyType {
+  country
+  vertical
+  department
+  sub_team
+  role
+  brand
+  language
+  training_level
+  trainer_type
+}
+
+enum LeVertical {
+  partner_academy
+  pse_academy
+  internal_ops
+  compliance
+}
+
+// ─── Auth / Users ─────────────────────────────────────────────────────────────
+
+model User {
+  id           String    @id @default(uuid())
+  email        String    @unique
+  passwordHash String    @map("password_hash")
+  emailConfirmed Boolean @default(false) @map("email_confirmed")
+  createdAt    DateTime  @default(now()) @map("created_at")
+  updatedAt    DateTime  @updatedAt @map("updated_at")
+  lastSignInAt DateTime? @map("last_sign_in_at")
+
+  profile                Profile?
+  userRoles              UserRole[]
+  appPermissions         AppPermission[]
+  refreshTokens          RefreshToken[]
+  passwordResetTokens    PasswordResetToken[]
+
+  @@map("users")
+}
+
+model Profile {
+  id          String  @id @map("id") // same as User.id
+  displayName String? @map("display_name")
+  avatarUrl   String? @map("avatar_url")
+  phone       String?
+
+  user User @relation(fields: [id], references: [id], onDelete: Cascade)
+
+  @@map("profiles")
+}
+
+model UserRole {
+  userId String  @map("user_id")
+  role   AppRole
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([userId, role])
+  @@map("user_roles")
+}
+
+model AppPermission {
+  userId        String   @map("user_id")
+  permissionKey String   @map("permission_key")
+  grantedBy     String?  @map("granted_by")
+  grantedAt     DateTime @default(now()) @map("granted_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([userId, permissionKey])
+  @@map("app_permissions")
+}
+
+model RefreshToken {
+  id        String   @id @default(uuid())
+  userId    String   @map("user_id")
+  token     String   @unique
+  expiresAt DateTime @map("expires_at")
+  createdAt DateTime @default(now()) @map("created_at")
+  revokedAt DateTime? @map("revoked_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("refresh_tokens")
+}
+
+model PasswordResetToken {
+  id        String   @id @default(uuid())
+  userId    String   @map("user_id")
+  token     String   @unique
+  expiresAt DateTime @map("expires_at")
+  usedAt    DateTime? @map("used_at")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("password_reset_tokens")
+}
+
+// ─── Email ────────────────────────────────────────────────────────────────────
+
+model EmailSendLog {
+  id              String   @id @default(uuid())
+  messageId       String?  @map("message_id")
+  templateName    String   @map("template_name")
+  recipientEmail  String   @map("recipient_email")
+  status          String   // pending | sent | failed | suppressed
+  errorMessage    String?  @map("error_message")
+  metadata        Json?
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  @@index([templateName, status, createdAt])
+  @@index([recipientEmail])
+  @@map("email_send_log")
+}
+
+model EmailUnsubscribeToken {
+  id        String    @id @default(uuid())
+  email     String    @unique
+  token     String    @unique
+  usedAt    DateTime? @map("used_at")
+  createdAt DateTime  @default(now()) @map("created_at")
+
+  @@map("email_unsubscribe_tokens")
+}
+
+model SuppressedEmail {
+  id          String   @id @default(uuid())
+  email       String   @unique
+  reason      String?
+  suppressedAt DateTime @default(now()) @map("suppressed_at")
+
+  @@map("suppressed_emails")
+}
+
+model EmailQueue {
+  id          String   @id @default(uuid())
+  messageId   String   @unique @map("message_id")
+  payload     Json
+  status      String   @default("pending") // pending | processing | sent | failed | dead
+  attempts    Int      @default(0)
+  lastAttemptAt DateTime? @map("last_attempt_at")
+  processAfter DateTime  @default(now()) @map("process_after")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  @@index([status, processAfter])
+  @@map("email_queue")
+}
+
+// ─── Learning Platform — Programs, Courses, Modules ──────────────────────────
+
+model LpProgram {
+  id          String   @id @default(uuid())
+  slug        String   @unique
+  title       String
+  summary     String?
+  coverUrl    String?  @map("cover_url")
+  published   Boolean  @default(false)
+  sortOrder   Int      @default(0) @map("sort_order")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  courses LpCourse[]
+
+  @@map("lp_programs")
+}
+
+model LpCourse {
+  id                    String   @id @default(uuid())
+  programId             String   @map("program_id")
+  slug                  String   @unique
+  title                 String
+  summary               String?
+  durationLabel         String?  @map("duration_label")
+  coverUrl              String?  @map("cover_url")
+  passPct               Int      @default(70) @map("pass_pct")
+  maxAttempts           Int?     @map("max_attempts")
+  day5GateDays          Int      @default(0) @map("day5_gate_days")
+  requiresProductUpload Boolean  @default(false) @map("requires_product_upload")
+  requiresInspection    Boolean  @default(false) @map("requires_inspection")
+  issuesCertificate     Boolean  @default(false) @map("issues_certificate")
+  maxCuisines           Int?     @map("max_cuisines")
+  published             Boolean  @default(false)
+  sortOrder             Int      @default(0) @map("sort_order")
+  productBrief          Json     @default("{}") @map("product_brief")
+  inspectionRubric      Json     @default("{}") @map("inspection_rubric")
+  certificateTemplate   Json     @default("{}") @map("certificate_template")
+  certificateTemplates  Json     @default("[]") @map("certificate_templates")
+  welcomeLetter         Json     @default("{}") @map("welcome_letter")
+  supportedLanguages    String[] @default(["en"]) @map("supported_languages")
+  journeySteps          String[] @default([]) @map("journey_steps")
+  sectionOrder          String[] @default([]) @map("section_order")
+  resourceCategories    String[] @default([]) @map("resource_categories")
+  videoCategories       String[] @default([]) @map("video_categories")
+  createdAt             DateTime @default(now()) @map("created_at")
+  updatedAt             DateTime @updatedAt @map("updated_at")
+
+  program            LpProgram           @relation(fields: [programId], references: [id])
+  modules            LpModule[]
+  days               LpCourseDay[]
+  enrolments         LpEnrolment[]
+  partnerInvites     LpPartnerInvite[]
+  certificates       LpCertificate[]
+  partnerCertificates LpPartnerCertificate[]
+  productSubmissions LpProductSubmission[]
+  partnerEvents      LpPartnerEvent[]
+  cuisines           LpCuisine[]
+  recipes            LpRecipe[]
+  sampleImageGuide   LpSampleImageGuide?
+  physicalVisits     LpPhysicalVisit[]
+  inspectionSlots    LpInspectionSlot[]
+  partnerResources   SftPartnerResource[]
+  videos             SftVideo[]
+
+  @@map("lp_courses")
+}
+
+model LpCourseDay {
+  id               String   @id @default(uuid())
+  courseId         String   @map("course_id")
+  dayNo            Int      @map("day_no")
+  title            String
+  summary          String?
+  unlockAfterDays  Int      @default(0) @map("unlock_after_days")
+  sortOrder        Int      @default(0) @map("sort_order")
+  createdAt        DateTime @default(now()) @map("created_at")
+  updatedAt        DateTime @updatedAt @map("updated_at")
+
+  course  LpCourse   @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  modules LpModule[]
+
+  @@unique([courseId, dayNo])
+  @@map("lp_course_days")
+}
+
+model LpModule {
+  id                 String       @id @default(uuid())
+  courseId           String       @map("course_id")
+  sortOrder          Int          @default(0) @map("sort_order")
+  type               LpModuleType
+  title              String
+  summary            String?
+  estMinutes         Int?         @map("est_minutes")
+  deckId             String?      @map("deck_id")
+  videoUrl           String?      @map("video_url")
+  readingMd          String?      @map("reading_md")
+  filePath           String?      @map("file_path")
+  published          Boolean      @default(false)
+  slideOverrides     Json         @default("{}") @map("slide_overrides")
+  voice              String?
+  language           String       @default("en")
+  speed              Float        @default(1.0)
+  autoplayAdvance    Boolean      @default(true) @map("autoplay_advance")
+  defaultSlideSeconds Int         @default(5) @map("default_slide_seconds")
+  quizEnabled        Boolean      @default(false) @map("quiz_enabled")
+  quizPassPct        Int          @default(70) @map("quiz_pass_pct")
+  quizQuestions      Json         @default("[]") @map("quiz_questions")
+  dayId              String?      @map("day_id")
+  quizPlacement      String       @default("topic") @map("quiz_placement")
+  createdAt          DateTime     @default(now()) @map("created_at")
+  updatedAt          DateTime     @updatedAt @map("updated_at")
+
+  course       LpCourse          @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  day          LpCourseDay?      @relation(fields: [dayId], references: [id], onDelete: SetNull)
+  deck         SftDeckSetup?     @relation(fields: [deckId], references: [id], onDelete: SetNull)
+  progress     LpModuleProgress[]
+  quizAttempts LpModuleQuizAttempt[]
+  quizzes      LpQuiz[]
+  notes        LpModuleNote[]
+
+  @@map("lp_modules")
+}
+
+model LpEnrolment {
+  id         String             @id @default(uuid())
+  userId     String             @map("user_id")
+  courseId   String             @map("course_id")
+  status     LpEnrolmentStatus  @default(active)
+  enrolledAt DateTime           @default(now()) @map("enrolled_at")
+  updatedAt  DateTime           @updatedAt @map("updated_at")
+
+  course LpCourse @relation(fields: [courseId], references: [id])
+
+  @@unique([userId, courseId])
+  @@map("lp_enrolments")
+}
+
+model LpModuleProgress {
+  id          String    @id @default(uuid())
+  userId      String    @map("user_id")
+  moduleId    String    @map("module_id")
+  completedAt DateTime? @map("completed_at")
+  progressPct Int       @default(0) @map("progress_pct")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+
+  module LpModule @relation(fields: [moduleId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, moduleId])
+  @@map("lp_module_progress")
+}
+
+model LpModuleQuizAttempt {
+  id          String   @id @default(uuid())
+  userId      String   @map("user_id")
+  moduleId    String   @map("module_id")
+  attemptNo   Int      @map("attempt_no")
+  placement   String   @default("topic")
+  questionIds String[] @map("question_ids")
+  answers     Json
+  scorePct    Float    @map("score_pct")
+  passed      Boolean
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  module LpModule @relation(fields: [moduleId], references: [id], onDelete: Cascade)
+
+  @@index([userId, moduleId])
+  @@map("lp_module_quiz_attempts")
+}
+
+model LpModuleNote {
+  id        String   @id @default(uuid())
+  userId    String   @map("user_id")
+  moduleId  String   @map("module_id")
+  body      String   @default("")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  module LpModule @relation(fields: [moduleId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, moduleId])
+  @@map("lp_module_notes")
+}
+
+model LpNotification {
+  id          String    @id @default(uuid())
+  partnerId   String    @map("partner_id")
+  moduleName  String    @map("module_name")
+  message     String
+  referenceId String?   @map("reference_id")
+  status      String    @default("unread")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  readAt      DateTime? @map("read_at")
+
+  @@index([partnerId, status])
+  @@index([partnerId, moduleName])
+  @@map("lp_notifications")
+}
+
+// ─── SFT Deck Setup ───────────────────────────────────────────────────────────
+
+model SftDeckSetup {
+  id              String   @id @default(uuid())
+  name            String
+  filePath        String   @map("file_path")
+  pdfPath         String?  @map("pdf_path")
+  voice           String   @default("alloy")
+  speed           Float    @default(1.0)
+  autoplayAdvance Boolean  @default(true) @map("autoplay_advance")
+  active          Boolean  @default(false)
+  uploadedBy      String?  @map("uploaded_by")
+  uploadedAt      DateTime @default(now()) @map("uploaded_at")
+
+  modules LpModule[]
+
+  @@map("sft_deck_setup")
+}
+
+// ─── Partner Invites & Events ─────────────────────────────────────────────────
+
+model LpPartnerInvite {
+  id              String    @id @default(uuid())
+  courseId        String    @map("course_id")
+  recipientName   String    @map("recipient_name")
+  recipientEmail  String    @map("recipient_email")
+  kitchenLocation String?   @map("kitchen_location")
+  message         String?
+  token           String    @default(uuid())
+  status          String    @default("sent")
+  invitedBy       String?   @map("invited_by")
+  userId          String?   @map("user_id")
+  sentAt          DateTime  @default(now()) @map("sent_at")
+  openedAt        DateTime? @map("opened_at")
+  acceptedAt      DateTime? @map("accepted_at")
+  revokedAt       DateTime? @map("revoked_at")
+  createdAt       DateTime  @default(now()) @map("created_at")
+
+  course  LpCourse       @relation(fields: [courseId], references: [id])
+  tasks   SftPartnerTask[]
+  events  LpPartnerEvent[]
+
+  @@index([courseId])
+  @@index([userId])
+  @@map("lp_partner_invites")
+}
+
+model LpPartnerEvent {
+  id        String   @id @default(uuid())
+  courseId  String   @map("course_id")
+  inviteId  String?  @map("invite_id")
+  userId    String?  @map("user_id")
+  eventType String   @map("event_type")
+  payload   Json?
+  createdAt DateTime @default(now()) @map("created_at")
+
+  course LpCourse         @relation(fields: [courseId], references: [id])
+  invite LpPartnerInvite? @relation(fields: [inviteId], references: [id], onDelete: SetNull)
+
+  @@map("lp_partner_events")
+}
+
+// ─── Product Submissions ──────────────────────────────────────────────────────
+
+model LpProductSubmission {
+  id          String             @id @default(uuid())
+  userId      String             @map("user_id")
+  courseId    String             @map("course_id")
+  files       Json               @default("[]")
+  notes       String?
+  status      LpSubmissionStatus @default(pending)
+  feedback    String?
+  reviewerId  String?            @map("reviewer_id")
+  reviewedAt  DateTime?          @map("reviewed_at")
+  submittedAt DateTime           @default(now()) @map("submitted_at")
+
+  course LpCourse @relation(fields: [courseId], references: [id])
+
+  @@index([userId, courseId])
+  @@map("lp_product_submissions")
+}
+
+// ─── Certificates ─────────────────────────────────────────────────────────────
+
+model LpCertificate {
+  id        String   @id @default(uuid())
+  userId    String   @map("user_id")
+  courseId  String   @map("course_id")
+  code      String   @unique
+  issuedAt  DateTime @default(now()) @map("issued_at")
+  filePath  String?  @map("file_path")
+  revokedAt DateTime? @map("revoked_at")
+
+  course LpCourse @relation(fields: [courseId], references: [id])
+
+  @@unique([userId, courseId])
+  @@index([userId])
+  @@map("lp_certificates")
+}
+
+// One row per (partner, course, additional-certificate-template) — lets a
+// course define several extra certificates (beyond the single main one
+// above) that all get issued to a partner once they complete the course.
+model LpPartnerCertificate {
+  id         String    @id @default(uuid())
+  userId     String    @map("user_id")
+  courseId   String    @map("course_id")
+  templateId String    @map("template_id")
+  code       String    @unique
+  issuedAt   DateTime  @default(now()) @map("issued_at")
+  revokedAt  DateTime? @map("revoked_at")
+
+  course LpCourse @relation(fields: [courseId], references: [id])
+
+  @@unique([userId, courseId, templateId])
+  @@index([userId])
+  @@map("lp_partner_certificates")
+}
+
+// ─── Quizzes ──────────────────────────────────────────────────────────────────
+
+model LpQuiz {
+  id        String   @id @default(uuid())
+  courseId  String   @map("course_id")
+  moduleId  String?  @map("module_id")
+  title     String
+  isFinal   Boolean  @default(false) @map("is_final")
+  shuffle   Boolean  @default(false)
+  createdAt DateTime @default(now()) @map("created_at")
+
+  module    LpModule?         @relation(fields: [moduleId], references: [id], onDelete: SetNull)
+  questions LpQuizQuestion[]
+
+  @@index([courseId, moduleId])
+  @@map("lp_quizzes")
+}
+
+model LpQuestion {
+  id          String             @id @default(uuid())
+  courseId    String             @map("course_id")
+  prompt      String
+  type        LpQuestionType     @default(single)
+  options     Json               @default("[]")
+  correct     Json               @default("[]")
+  explanation String?
+  createdAt   DateTime           @default(now()) @map("created_at")
+
+  quizLinks LpQuizQuestion[]
+
+  @@map("lp_questions")
+}
+
+model LpQuizQuestion {
+  quizId     String @map("quiz_id")
+  questionId String @map("question_id")
+  sortOrder  Int    @default(0) @map("sort_order")
+
+  quiz     LpQuiz     @relation(fields: [quizId], references: [id], onDelete: Cascade)
+  question LpQuestion @relation(fields: [questionId], references: [id], onDelete: Cascade)
+
+  @@id([quizId, questionId])
+  @@map("lp_quiz_questions")
+}
+
+// ─── Cuisines, Recipes, Assignments ──────────────────────────────────────────
+
+model LpCuisine {
+  id        String   @id @default(uuid())
+  courseId  String   @map("course_id")
+  name      String
+  sortOrder Int      @default(0) @map("sort_order")
+  showCount Int      @default(0) @map("show_count")
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now()) @map("created_at")
+
+  course  LpCourse    @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  recipes LpRecipe[]
+
+  @@map("lp_cuisines")
+}
+
+model LpRecipe {
+  id             String   @id @default(uuid())
+  courseId       String   @map("course_id")
+  cuisineId      String?  @map("cuisine_id")
+  foodName       String   @map("food_name")
+  ingredientsMd  String   @default("") @map("ingredients_md")
+  prepStepsMd    String?  @map("prep_steps_md")
+  cookStepsMd    String?  @map("cook_steps_md")
+  imagePath      String?  @map("image_path")
+  active         Boolean  @default(true)
+  sortOrder      Int      @default(0) @map("sort_order")
+  status         String   @default("active")
+  createdBy      String?  @map("created_by")
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  course  LpCourse    @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  cuisine LpCuisine?  @relation(fields: [cuisineId], references: [id], onDelete: SetNull)
+
+  @@map("lp_recipes")
+}
+
+model LpSampleImageGuide {
+  courseId        String   @id @map("course_id")
+  sampleImagePath String?  @map("sample_image_path")
+  guidelinesMd    String   @default("") @map("guidelines_md")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  course LpCourse @relation(fields: [courseId], references: [id], onDelete: Cascade)
+
+  @@map("lp_sample_image_guide")
+}
+
+model LpProductAssignment {
+  id        String   @id @default(uuid())
+  userId    String   @map("user_id")
+  courseId  String   @map("course_id")
+  cuisineId String   @map("cuisine_id")
+  recipeId  String   @map("recipe_id")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([userId, courseId])
+  @@map("lp_product_assignments")
+}
+
+model LpRecipeAssignment {
+  partnerUserId  String   @map("partner_user_id")
+  courseId       String   @map("course_id")
+  recipeId       String   @map("recipe_id")
+  assignedBy     String?  @map("assigned_by")
+  assignedMethod String   @default("manual") @map("assigned_method")
+  assignedAt     DateTime @default(now()) @map("assigned_at")
+
+  @@id([partnerUserId, courseId])
+  @@map("lp_recipe_assignments")
+}
+
+// ─── Physical Visits ──────────────────────────────────────────────────────────
+
+model LpPhysicalVisit {
+  id                  String          @id @default(uuid())
+  userId              String          @map("user_id")
+  courseId            String          @map("course_id")
+  recipeId            String?         @map("recipe_id")
+  productIds          Json            @default("[]") @map("product_ids")
+  submissionId        String?         @map("submission_id")
+  attemptNo           Int             @default(1) @map("attempt_no")
+  partnerLocation     String?         @map("partner_location")
+  partnerState        String?         @map("partner_state")
+  partnerCountry      String?         @map("partner_country")
+  partnerPhone        String?         @map("partner_phone")
+  partnerAddress      String?         @map("partner_address")
+  cuisineId           String?         @map("cuisine_id")
+  visitorName         String?         @map("visitor_name")
+  visitorEmail        String?         @map("visitor_email")
+  visitorPhone        String?         @map("visitor_phone")
+  visitorLocation     String?         @map("visitor_location")
+  visitDate           String?         @map("visit_date")
+  visitTime           String?         @map("visit_time")
+  remarks             String?
+  status              LpVisitStatus   @default(eligible)
+  emailStatus         LpEmailStatus   @default(pending) @map("email_status")
+  lastEmailKind       String?         @map("last_email_kind")
+  visitorEmailSentAt  DateTime?       @map("visitor_email_sent_at")
+  partnerEmailSentAt  DateTime?       @map("partner_email_sent_at")
+  formStatus          LpFormStatus    @default(not_sent) @map("form_status")
+  googleFormUrl       String?         @map("google_form_url")
+  formSubmittedAt     DateTime?       @map("form_submitted_at")
+  finalDecision       LpFinalDecision? @map("final_decision")
+  decisionComments    String?         @map("decision_comments")
+  submittedAt         DateTime?       @map("submitted_at")
+  totalProducts       Int?            @map("total_products")
+  acceptedProducts    Int?            @map("accepted_products")
+  rejectedProducts    Int?            @map("rejected_products")
+  inspectionPercentage Float?         @map("inspection_percentage")
+  assignedBy          String?         @map("assigned_by")
+  assignedAt          DateTime?       @map("assigned_at")
+  createdAt           DateTime        @default(now()) @map("created_at")
+  updatedAt           DateTime        @updatedAt @map("updated_at")
+
+  course      LpCourse                          @relation(fields: [courseId], references: [id])
+  photos      LpPhysicalVisitPhoto[]
+  history     LpPhysicalVisitHistory[]
+  token       LpPhysicalVisitToken?
+  inspections LpPhysicalVisitProductInspection[]
+
+  @@index([userId])
+  @@map("lp_physical_visits")
+}
+
+model LpPhysicalVisitPhoto {
+  id         String   @id @default(uuid())
+  visitId    String   @map("visit_id")
+  attemptNo  Int      @default(1) @map("attempt_no")
+  productId  String?  @map("product_id")
+  imagePath  String   @map("image_path")
+  caption    String?
+  uploadedAt DateTime @default(now()) @map("uploaded_at")
+
+  visit LpPhysicalVisit @relation(fields: [visitId], references: [id], onDelete: Cascade)
+
+  @@index([visitId, attemptNo])
+  @@map("lp_physical_visit_photos")
+}
+
+model LpPhysicalVisitProductInspection {
+  id          String   @id @default(uuid())
+  visitId     String   @map("visit_id")
+  attemptNo   Int      @default(1) @map("attempt_no")
+  productId   String   @map("product_id")
+  productName String   @map("product_name")
+  status      String   @default("pending")
+  comment     String?
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  visit LpPhysicalVisit @relation(fields: [visitId], references: [id], onDelete: Cascade)
+
+  @@unique([visitId, attemptNo, productId])
+  @@map("lp_physical_visit_product_inspections")
+}
+
+model LpPhysicalVisitHistory {
+  id           String    @id @default(uuid())
+  visitId      String    @map("visit_id")
+  attemptNo    Int       @map("attempt_no")
+  visitorName     String?   @map("visitor_name")
+  visitorEmail    String?   @map("visitor_email")
+  visitorPhone    String?   @map("visitor_phone")
+  visitorLocation String?   @map("visitor_location")
+  visitDate       String?   @map("visit_date")
+  visitTime       String?   @map("visit_time")
+  decision        String?
+  comments        String?
+  photos          Json      @default("[]")
+  assignedProducts Json     @default("[]") @map("assigned_products")
+  productInspections Json   @default("[]") @map("product_inspections")
+  totalProducts    Int?      @map("total_products")
+  acceptedProducts Int?      @map("accepted_products")
+  rejectedProducts Int?      @map("rejected_products")
+  inspectionPercentage Float? @map("inspection_percentage")
+  submittedAt     DateTime? @map("submitted_at")
+  createdAt       DateTime  @default(now()) @map("created_at")
+
+  visit LpPhysicalVisit @relation(fields: [visitId], references: [id], onDelete: Cascade)
+
+  @@map("lp_physical_visit_history")
+}
+
+model LpPhysicalVisitToken {
+  id        String    @id @default(uuid())
+  visitId   String    @unique @map("visit_id")
+  token     String    @unique
+  expiresAt DateTime? @map("expires_at")
+  createdAt DateTime  @default(now()) @map("created_at")
+
+  visit LpPhysicalVisit @relation(fields: [visitId], references: [id], onDelete: Cascade)
+
+  @@map("lp_physical_visit_tokens")
+}
+
+// ─── Inspection Slots & Bookings ──────────────────────────────────────────────
+
+model LpInspectionSlot {
+  id        String   @id @default(uuid())
+  courseId  String   @map("course_id")
+  startAt   DateTime @map("start_at")
+  endAt     DateTime @map("end_at")
+  capacity  Int      @default(1)
+  createdAt DateTime @default(now()) @map("created_at")
+
+  course   LpCourse             @relation(fields: [courseId], references: [id])
+  bookings LpInspectionBooking[]
+
+  @@map("lp_inspection_slots")
+}
+
+model LpInspectionBooking {
+  id       String          @id @default(uuid())
+  slotId   String          @map("slot_id")
+  userId   String          @map("user_id")
+  status   LpBookingStatus @default(booked)
+  bookedAt DateTime        @default(now()) @map("booked_at")
+
+  slot LpInspectionSlot @relation(fields: [slotId], references: [id])
+
+  @@index([userId])
+  @@map("lp_inspection_bookings")
+}
+
+// ─── Partner Hub Resources & Videos ──────────────────────────────────────────
+
+model SftPartnerResource {
+  id         String   @id @default(uuid())
+  courseId   String?  @map("course_id")
+  brandId    String?  @map("brand_id")
+  title      String
+  category   String
+  filePath   String   @map("file_path")
+  bucket     String   @default("sft-decks")
+  sortOrder  Int      @default(0) @map("sort_order")
+  createdBy  String?  @map("created_by")
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  course LpCourse? @relation(fields: [courseId], references: [id], onDelete: SetNull)
+
+  @@map("sft_partner_resources")
+}
+
+model SftVideo {
+  id            String   @id @default(uuid())
+  courseId      String?  @map("course_id")
+  brandId       String?  @map("brand_id")
+  category      String
+  title         String
+  description   String?
+  videoPath     String?  @map("video_path")
+  externalUrl   String?  @map("external_url")
+  bucket        String   @default("sft-videos")
+  thumbnailPath String?  @map("thumbnail_path")
+  sortOrder     Int      @default(0) @map("sort_order")
+  createdBy     String?  @map("created_by")
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  course LpCourse? @relation(fields: [courseId], references: [id], onDelete: SetNull)
+
+  @@map("sft_videos")
+}
+
+model SftPartnerTask {
+  id          String    @id @default(uuid())
+  inviteId    String    @map("invite_id")
+  title       String
+  body        String?
+  status      String    @default("open")
+  dueAt       DateTime? @map("due_at")
+  completedAt DateTime? @map("completed_at")
+  createdBy   String?   @map("created_by")
+  createdAt   DateTime  @default(now()) @map("created_at")
+
+  invite LpPartnerInvite @relation(fields: [inviteId], references: [id], onDelete: Cascade)
+
+  @@map("sft_partner_tasks")
+}
+
+// ─── Food Cost ────────────────────────────────────────────────────────────────
+
+model FcUnit {
+  id   String @id @default(uuid())
+  code String @unique
+  name String
+  kind String // mass | volume | count | other
+
+  ingredients FcIngredient[]
+  preps       FcPrep[]
+  packingContainers FcPackingContainer[]
+  recipeItems FcRecipeItem[]
+  recipeVersions FcRecipeVersion[]
+
+  @@map("fc_units")
+}
+
+model FcBrand {
+  id          String    @id @default(uuid())
+  name        String
+  code        String    @unique
+  codePrefix  String?   @map("code_prefix")
+  description String?
+  brandSince  DateTime? @map("brand_since")
+  activeIn    Boolean   @default(true) @map("active_in")
+  activeUs    Boolean   @default(true) @map("active_us")
+  status      FcStatus  @default(active)
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+
+  categories FcCategory[]
+  products   FcProduct[]
+  preps      FcPrep[]
+
+  @@map("fc_brands")
+}
+
+model FcCategory {
+  id                  String   @id @default(uuid())
+  brandId             String   @map("brand_id")
+  name                String
+  description         String?
+  heroImageUrl        String?  @map("hero_image_url")
+  vcrImageUrl        String?  @map("vcr_image_url")
+  packingImageUrl     String?  @map("packing_image_url")
+  videoUrl            String?  @map("video_url")
+  activeIn            Boolean  @default(true) @map("active_in")
+  activeUs            Boolean  @default(true) @map("active_us")
+  status              FcStatus @default(active)
+  vegSlotQty          Float    @default(0) @map("veg_slot_qty")
+  vegSlotUnitId       String?  @map("veg_slot_unit_id")
+  servesMin           Float?   @map("serves_min")
+  servesMax           Float?   @map("serves_max")
+  colourNote          String?  @map("colour_note")
+  consistencyNote     String?  @map("consistency_note")
+  tasteNote           String?  @map("taste_note")
+  crcRecipeId         String?  @map("crc_recipe_id")
+  packingContainerId  String?  @map("packing_container_id")
+  packingContainerIdIn String? @map("packing_container_id_in")
+  packingContainerIdUs String? @map("packing_container_id_us")
+  mrpMode             String   @default("multiplier") @map("mrp_mode")
+  mrpMultiplierInr    Float    @default(1) @map("mrp_multiplier_inr")
+  mrpMultiplierUsd    Float    @default(1) @map("mrp_multiplier_usd")
+  mrpFlatInr          Float    @default(0) @map("mrp_flat_inr")
+  mrpFlatUsd          Float    @default(0) @map("mrp_flat_usd")
+  pppMode             String   @default("multiplier") @map("ppp_mode")
+  pppMultiplierInr    Float    @default(1) @map("ppp_multiplier_inr")
+  pppMultiplierUsd    Float    @default(1) @map("ppp_multiplier_usd")
+  pppFlatInr          Float    @default(0) @map("ppp_flat_inr")
+  pppFlatUsd          Float    @default(0) @map("ppp_flat_usd")
+  ptrMode             String   @default("multiplier") @map("ptr_mode")
+  ptrMultiplierInr    Float    @default(1) @map("ptr_multiplier_inr")
+  ptrMultiplierUsd    Float    @default(1) @map("ptr_multiplier_usd")
+  ptrFlatInr          Float    @default(0) @map("ptr_flat_inr")
+  ptrFlatUsd          Float    @default(0) @map("ptr_flat_usd")
+  createdAt           DateTime @default(now()) @map("created_at")
+  updatedAt           DateTime @updatedAt @map("updated_at")
+
+  brand    FcBrand             @relation(fields: [brandId], references: [id])
+  products FcProduct[]
+  recipes  FcRecipe[]
+
+  @@map("fc_categories")
+}
+
+model FcIngredient {
+  id              String               @id @default(uuid())
+  name            String
+  category        FcIngredientCategory @default(grocery)
+  baseUnitId      String               @map("base_unit_id")
+  priceInr        Float                @default(0) @map("price_inr")
+  priceUsd        Float                @default(0) @map("price_usd")
+  kcalPer100      Float                @default(0) @map("kcal_per_100")
+  proteinGPer100  Float                @default(0) @map("protein_g_per_100")
+  carbsGPer100    Float                @default(0) @map("carbs_g_per_100")
+  fatGPer100      Float                @default(0) @map("fat_g_per_100")
+  fibreGPer100    Float                @default(0) @map("fibre_g_per_100")
+  isAnimalOrigin  Boolean              @default(false) @map("is_animal_origin")
+  isDairy         Boolean              @default(false) @map("is_dairy")
+  activeIn        Boolean              @default(true) @map("active_in")
+  activeUs        Boolean              @default(true) @map("active_us")
+  manuallyUsed    Boolean              @default(false) @map("manually_used")
+  status          FcStatus             @default(active)
+  lastUpdatedAt   DateTime             @default(now()) @map("last_updated_at")
+  lastUpdatedBy   String?              @map("last_updated_by")
+  createdAt       DateTime             @default(now()) @map("created_at")
+  updatedAt       DateTime             @updatedAt @map("updated_at")
+
+  baseUnit     FcUnit                    @relation(fields: [baseUnitId], references: [id])
+  priceHistory FcIngredientPriceHistory[]
+  recipeItems  FcRecipeItem[]
+
+  @@map("fc_ingredients")
+}
+
+model FcIngredientPriceHistory {
+  id           String     @id @default(uuid())
+  ingredientId String     @map("ingredient_id")
+  currency     FcCurrency
+  oldPrice     Float      @map("old_price")
+  newPrice     Float      @map("new_price")
+  reason       String?
+  changedBy    String?    @map("changed_by")
+  changedAt    DateTime   @default(now()) @map("changed_at")
+
+  ingredient FcIngredient @relation(fields: [ingredientId], references: [id])
+
+  @@map("fc_ingredient_price_history")
+}
+
+model FcPackingContainer {
+  id         String   @id @default(uuid())
+  name       String
+  sizeQty    Float    @default(0) @map("size_qty")
+  sizeUnitId String?  @map("size_unit_id")
+  imageUrl   String?  @map("image_url")
+  priceInr   Float    @default(0) @map("price_inr")
+  priceUsd   Float    @default(0) @map("price_usd")
+  activeIn   Boolean  @default(true) @map("active_in")
+  activeUs   Boolean  @default(true) @map("active_us")
+  status     FcStatus @default(active)
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+
+  sizeUnit FcUnit? @relation(fields: [sizeUnitId], references: [id])
+
+  @@map("fc_packing_containers")
+}
+
+model FcPrep {
+  id                 String         @id @default(uuid())
+  name               String
+  code               String         @unique
+  type               FcPrepType     @default(base)
+  baseUnitId         String         @map("base_unit_id")
+  brandId            String?        @map("brand_id")
+  categoryId         String?        @map("category_id")
+  cuisine            String?
+  description        String?
+  preparationNotes   String?        @map("preparation_notes")
+  storageNotes       String?        @map("storage_notes")
+  shelfLifeDays      Int?           @map("shelf_life_days")
+  shelfLifeCondition String?        @map("shelf_life_condition")
+  defaultBatchSize   Float?         @map("default_batch_size")
+  defaultYieldQty    Float?         @map("default_yield_qty")
+  defaultYieldUnitId String?        @map("default_yield_unit_id")
+  defaultWastagePct  Float          @default(0) @map("default_wastage_pct")
+  lumpWeightG        Float?         @map("lump_weight_g")
+  currencyMode       FcCurrencyMode @default(both) @map("currency_mode")
+  activeIn           Boolean        @default(true) @map("active_in")
+  activeUs           Boolean        @default(true) @map("active_us")
+  manuallyUsed       Boolean        @default(false) @map("manually_used")
+  status             FcStatus       @default(active)
+  createdAt          DateTime       @default(now()) @map("created_at")
+  updatedAt          DateTime       @updatedAt @map("updated_at")
+
+  baseUnit    FcUnit       @relation(fields: [baseUnitId], references: [id])
+  brand       FcBrand?     @relation(fields: [brandId], references: [id])
+  recipeItems FcRecipeItem[]
+
+  @@map("fc_preps")
+}
+
+model FcProduct {
+  id             String         @id @default(uuid())
+  name           String
+  code           String         @unique
+  brandId        String         @map("brand_id")
+  categoryId     String         @map("category_id")
+  description    String?
+  menuDescription String?       @map("menu_description")
+  menuPosition   Int            @default(0) @map("menu_position")
+  imageUrl       String?        @map("image_url")
+  spiceLevel     Int            @default(0) @map("spice_level")
+  vegMode        FcVegMode      @default(none) @map("veg_mode")
+  vegIngredientIds String[]     @default([]) @map("veg_ingredient_ids")
+  vegQtyOverride Float?         @map("veg_qty_override")
+  allergens      String[]       @default([])
+  servesLabel    String?        @map("serves_label")
+  available      Boolean        @default(true)
+  currencyMode   FcCurrencyMode @default(both) @map("currency_mode")
+  activeIn       Boolean        @default(true) @map("active_in")
+  activeUs       Boolean        @default(true) @map("active_us")
+  status         FcStatus       @default(active)
+  createdAt      DateTime       @default(now()) @map("created_at")
+  updatedAt      DateTime       @updatedAt @map("updated_at")
+
+  brand    FcBrand    @relation(fields: [brandId], references: [id])
+  category FcCategory @relation(fields: [categoryId], references: [id])
+  recipe   FcRecipe?
+
+  @@map("fc_products")
+}
+
+model FcRecipe {
+  id               String         @id @default(uuid())
+  productId        String?        @unique @map("product_id")
+  prepId           String?        @map("prep_id")
+  categoryId       String?        @map("category_id")
+  status           FcRecipeStatus @default(draft)
+  currentVersionId String?        @map("current_version_id")
+  createdBy        String?        @map("created_by")
+  createdAt        DateTime       @default(now()) @map("created_at")
+  updatedAt        DateTime       @updatedAt @map("updated_at")
+
+  product      FcProduct?         @relation(fields: [productId], references: [id])
+  category     FcCategory?        @relation(fields: [categoryId], references: [id])
+  versions     FcRecipeVersion[]
+  approvalLogs FcApprovalLog[]
+
+  @@map("fc_recipes")
+}
+
+model FcRecipeVersion {
+  id            String          @id @default(uuid())
+  recipeId      String          @map("recipe_id")
+  versionNo     Int             @map("version_no")
+  currency      FcCurrency
+  wastagePct    Float           @default(0) @map("wastage_pct")
+  yieldQty      Float?          @map("yield_qty")
+  yieldUnitId   String?         @map("yield_unit_id")
+  changeSummary String?         @map("change_summary")
+  notes         String?
+  mrpMode       String?         @map("mrp_mode")
+  mrpMultiplier Float?          @map("mrp_multiplier")
+  mrpFlat       Float?          @map("mrp_flat")
+  pppMode       String?         @map("ppp_mode")
+  pppMultiplier Float?          @map("ppp_multiplier")
+  pppFlat       Float?          @map("ppp_flat")
+  status        FcVersionStatus @default(draft)
+  submittedAt   DateTime?       @map("submitted_at")
+  submittedBy   String?         @map("submitted_by")
+  reviewedAt    DateTime?       @map("reviewed_at")
+  reviewedBy    String?         @map("reviewed_by")
+  approvedAt    DateTime?       @map("approved_at")
+  approvedBy    String?         @map("approved_by")
+  createdAt     DateTime        @default(now()) @map("created_at")
+  updatedAt     DateTime        @updatedAt @map("updated_at")
+
+  recipe   FcRecipe       @relation(fields: [recipeId], references: [id])
+  yieldUnit FcUnit?       @relation(fields: [yieldUnitId], references: [id])
+  items    FcRecipeItem[]
+
+  @@unique([recipeId, versionNo])
+  @@map("fc_recipe_versions")
+}
+
+model FcRecipeItem {
+  id           String   @id @default(uuid())
+  versionId    String   @map("version_id")
+  ingredientId String?  @map("ingredient_id")
+  prepId       String?  @map("prep_id")
+  qty          Float
+  unitId       String   @map("unit_id")
+  wastagePct   Float    @default(0) @map("wastage_pct")
+  isVegSlot    Boolean  @default(false) @map("is_veg_slot")
+  notes        String?
+  position     Int      @default(0)
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  version    FcRecipeVersion @relation(fields: [versionId], references: [id], onDelete: Cascade)
+  ingredient FcIngredient?   @relation(fields: [ingredientId], references: [id])
+  prep       FcPrep?         @relation(fields: [prepId], references: [id])
+  unit       FcUnit          @relation(fields: [unitId], references: [id])
+
+  @@map("fc_recipe_items")
+}
+
+model FcApprovalLog {
+  id         String   @id @default(uuid())
+  recipeId   String   @map("recipe_id")
+  versionId  String?  @map("version_id")
+  fromStatus String?  @map("from_status")
+  toStatus   String   @map("to_status")
+  role       String?
+  comment    String?
+  actorId    String?  @map("actor_id")
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  recipe FcRecipe @relation(fields: [recipeId], references: [id])
+
+  @@map("fc_approval_log")
+}
+
+model FcPriceList {
+  id          String     @id @default(uuid())
+  name        String
+  currency    FcCurrency
+  status      String     @default("draft")
+  notes       String?
+  generatedAt DateTime   @default(now()) @map("generated_at")
+  generatedBy String?    @map("generated_by")
+  submittedAt DateTime?  @map("submitted_at")
+  submittedBy String?    @map("submitted_by")
+  reviewedAt  DateTime?  @map("reviewed_at")
+  reviewedBy  String?    @map("reviewed_by")
+  approvedAt  DateTime?  @map("approved_at")
+  approvedBy  String?    @map("approved_by")
+  createdAt   DateTime   @default(now()) @map("created_at")
+  updatedAt   DateTime   @updatedAt @map("updated_at")
+
+  items FcPriceListItem[]
+  logs  FcPriceListLog[]
+
+  @@map("fc_price_lists")
+}
+
+model FcPriceListItem {
+  id          String  @id @default(uuid())
+  priceListId String  @map("price_list_id")
+  refId       String  @map("ref_id")
+  kind        String  // product | prep | ingredient
+  name        String
+  unitCode    String? @map("unit_code")
+  unitPrice   Float   @default(0) @map("unit_price")
+  packingPrice Float? @map("packing_price")
+  mrpPrice    Float?  @map("mrp_price")
+  pppPrice    Float?  @map("ppp_price")
+  totalPrice  Float?  @map("total_price")
+  position    Int     @default(0)
+  meta        Json?
+
+  priceList FcPriceList @relation(fields: [priceListId], references: [id], onDelete: Cascade)
+
+  @@map("fc_price_list_items")
+}
+
+model FcPriceListLog {
+  id          String   @id @default(uuid())
+  priceListId String   @map("price_list_id")
+  fromStatus  String?  @map("from_status")
+  toStatus    String   @map("to_status")
+  role        String?
+  comment     String?
+  actorId     String?  @map("actor_id")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  priceList FcPriceList @relation(fields: [priceListId], references: [id])
+
+  @@map("fc_price_list_log")
+}
+
+// ─── Config & FAQs ────────────────────────────────────────────────────────────
+
+model ConfigEntry {
+  id        String   @id @default(uuid())
+  section   String
+  key       String
+  label     String
+  value     Json     @default("{}")
+  notes     String?
+  country   String?
+  language  String?
+  position  Int      @default(0)
+  isActive  Boolean  @default(true) @map("is_active")
+  createdBy String?  @map("created_by")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@unique([section, key])
+  @@map("config_entries")
+}
+
+model FaqEntry {
+  id        String      @id @default(uuid())
+  question  String
+  answerMd  String      @map("answer_md")
+  audience  FaqAudience
+  category  String?
+  country   String?
+  language  String      @default("en")
+  position  Int         @default(0)
+  isActive  Boolean     @default(true) @map("is_active")
+  createdAt DateTime    @default(now()) @map("created_at")
+  updatedAt DateTime    @updatedAt @map("updated_at")
+
+  @@map("faq_entries")
+}
+
+// ─── Partner onboarding: external payment → admin verification → OTP login ────
+// Payment records are written by an external payment integration (handled
+// separately) or inserted directly for now — this module only displays and
+// manages them once they exist.
+
+model PartnerPayment {
+  id                 String   @id @default(uuid())
+  externalPartnerId  String?  @map("external_partner_id")
+  partnerName        String   @map("partner_name")
+  partnerEmail       String   @map("partner_email")
+  paymentId          String   @unique @map("payment_id")
+  amount             Float
+  paymentStatus      String   @default("unpaid") @map("payment_status") // paid | unpaid
+  approvalStatus     String   @default("pending") @map("approval_status") // pending | accepted | rejected
+  inviteStatus       String   @default("pending") @map("invite_status") // pending | sent
+  createdAt          DateTime @default(now()) @map("created_at")
+
+  invite PartnerInvite?
+
+  @@index([partnerEmail])
+  @@map("partner_payments")
+}
+
+model PartnerInvite {
+  id               String   @id @default(uuid())
+  partnerPaymentId String   @unique @map("partner_payment_id")
+  partnerEmail     String   @map("partner_email")
+  inviteToken      String   @unique @map("invite_token")
+  inviteLink       String?  @map("invite_link")
+  inviteStatus     String   @default("pending") @map("invite_status") // pending | sent
+  createdAt        DateTime @default(now()) @map("created_at")
+
+  payment PartnerPayment @relation(fields: [partnerPaymentId], references: [id], onDelete: Cascade)
+
+  @@index([partnerEmail])
+  @@map("partner_invites")
+}
+
+model PartnerOtp {
+  id             String   @id @default(uuid())
+  partnerEmail   String   @map("partner_email")
+  otpCode        String   @map("otp_code")
+  expiresAt      DateTime @map("expires_at")
+  verifiedStatus Boolean  @default(false) @map("verified_status")
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  @@index([partnerEmail])
+  @@map("partner_otp")
+}
