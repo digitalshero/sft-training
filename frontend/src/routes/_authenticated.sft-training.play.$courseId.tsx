@@ -47,15 +47,31 @@ export const Route = createFileRoute(
 
 const DEFAULT_DURATION = 60;
 
+// TEMP: hardcoded video override to bypass ElevenLabs TTS cost for specific
+// courses that already have a fully pre-rendered video (slides + narration
+// baked in via PowerPoint's "Create a Video" export). Add more course IDs
+// here as needed.
+const VIDEO_OVERRIDE: Record<string, string> = {
+  "2ac06a86-ce05-42e8-bc36-a0b676873d20":
+    "https://sft.sherosft.com/videos/scpp-voice.mp4",
+};
+
 function PitchPlayerPage() {
   const { courseId } = Route.useParams();
+  const isVideoOverride = Boolean(VIDEO_OVERRIDE[courseId]);
+
   const fn = getCourseTeachData;
   const q = useQuery({
     queryKey: ["pitch-teach", courseId],
     queryFn: () => fn({ course_id: courseId }),
     staleTime: 0,
     refetchOnMount: "always",
+    enabled: !isVideoOverride,
   });
+
+  if (isVideoOverride) {
+    return <VideoPitchPlayer videoUrl={VIDEO_OVERRIDE[courseId]} />;
+  }
 
   // Slide text (titles/bullets/speaker notes) is parsed server-side, cached,
   // and returned right alongside the rest of teach-data — no separate
@@ -117,6 +133,31 @@ function PitchPlayerPage() {
         (data.module.slide_overrides ?? {}) as Record<string, SlideOverride>
       }
     />
+  );
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Video override player — plays a single pre-rendered video (slides + audio
+// already baked in) instead of the PDF-canvas + live-TTS system.
+// ────────────────────────────────────────────────────────────────────────────
+function VideoPitchPlayer({ videoUrl }: { videoUrl: string }) {
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between gap-3">
+        <Button asChild size="sm" variant="ghost">
+          <Link to="/sft-training/program">
+            <ArrowLeft className="h-4 w-4" /> Program
+          </Link>
+        </Button>
+      </div>
+      <Card className="overflow-hidden">
+        <video
+          src={videoUrl}
+          controls
+          className="w-full aspect-video bg-black"
+        />
+      </Card>
+    </div>
   );
 }
 
@@ -188,15 +229,11 @@ function PitchPlayer(props: PlayerProps) {
   const [muted, setMuted] = useState(false);
   const [isFs, setIsFs] = useState(false);
 
-  // Effective per-slide config = override (if present) else defaults.
-  // Voice and speed are fixed for everyone (see lib/tts-voice.ts) — only
-  // slide duration is still configurable per slide.
   const slideIdx = slides[current]?.index ?? current + 1;
   const slideKey = String(slideIdx);
   const ov = overrides[slideKey] ?? {};
   const effDuration = ov.duration_seconds ?? defaultDuration;
 
-  // Form draft (mirrors effective value so user can edit + Save / Reset).
   const [draftDuration, setDraftDuration] = useState(String(effDuration));
   useEffect(() => {
     setDraftDuration(String(effDuration));
@@ -206,7 +243,6 @@ function PitchPlayer(props: PlayerProps) {
   const hasOverride = Boolean(overrides[slideKey]);
   const isDirty = Number(draftDuration) !== effDuration;
 
-  // ── TTS playback (PCM via /api/sft-tts SSE stream) ───────────────────────
   const ctxRef = useRef<AudioContext | null>(null);
   const gainRef = useRef<GainNode | null>(null);
   const playheadRef = useRef(0);
@@ -273,9 +309,10 @@ function PitchPlayer(props: PlayerProps) {
     const draftDu = Number(draftDuration);
     const v = STATIC_VOICE_ID;
     const sp = STATIC_SPEED;
-    const dur = isEditingThisSlide && Number.isFinite(draftDu) && draftDu > 0
-      ? draftDu
-      : (o.duration_seconds ?? defaultDuration);
+    const dur =
+      isEditingThisSlide && Number.isFinite(draftDu) && draftDu > 0
+        ? draftDu
+        : (o.duration_seconds ?? defaultDuration);
     const text = (o.speaker_notes ?? slide.notes ?? "").trim();
 
     setStatus("loading");
@@ -321,10 +358,6 @@ function PitchPlayer(props: PlayerProps) {
       if (seq !== seqRef.current) return;
       const source = ctx.createBufferSource();
       source.buffer = audioBuf;
-      // Speed is applied client-side via playbackRate (ElevenLabs doesn't
-      // take an arbitrary rate multiplier the way the old OpenAI proxy did),
-      // so the advance timer must account for the sped-up/slowed-down
-      // real-world playback duration, not the buffer's nominal duration.
       source.playbackRate.value = sp;
       source.connect(gainRef.current ?? ctx.destination);
       source.start(0);
@@ -333,7 +366,9 @@ function PitchPlayer(props: PlayerProps) {
       scheduleAdvance((audioBuf.duration / sp) * 1000);
     } catch (err) {
       if (controller.signal.aborted) return;
-      toast.error(`Slide ${slide.index}: audio error — advancing without voice.`);
+      toast.error(
+        `Slide ${slide.index}: audio error — advancing without voice.`,
+      );
       setStatus("waiting");
       scheduleAdvance(0);
     }
@@ -347,9 +382,6 @@ function PitchPlayer(props: PlayerProps) {
     stopAudio();
     setStatus("paused");
   }
-  // Manual navigation always stops narration and leaves the newly selected
-  // slide silent — the presenter has to press Start/Resume again, it never
-  // auto-continues just because playback happened to be running.
   function handlePrev() {
     if (current === 0) return;
     stopAudio();
@@ -373,7 +405,6 @@ function PitchPlayer(props: PlayerProps) {
     setStatus("idle");
   }
 
-  // Fullscreen.
   useEffect(() => {
     const onFs = () => setIsFs(!!document.fullscreenElement);
     document.addEventListener("fullscreenchange", onFs);
@@ -387,7 +418,6 @@ function PitchPlayer(props: PlayerProps) {
     else await el.requestFullscreen().catch(() => {});
   }
 
-  // ── Save / Reset slide config ────────────────────────────────────────────
   const saveMut = useMutation({
     mutationFn: upsertSlideOverride,
     onSuccess: () => {
@@ -416,7 +446,6 @@ function PitchPlayer(props: PlayerProps) {
     saveMut.mutate({ id: moduleId, slide_overrides: updated });
   }
 
-  // ── Render ───────────────────────────────────────────────────────────────
   const speakerNotes = ov.speaker_notes ?? slides[current]?.notes ?? "";
   const slideTitle = ov.title ?? slides[current]?.title ?? "";
 
@@ -493,7 +522,11 @@ function PitchPlayer(props: PlayerProps) {
         <>
           <div className="relative flex-1 min-h-0 bg-black">
             <div className="absolute inset-0">
-              <PdfSlideCanvas url={pdfUrl} pageNumber={slideIdx} cacheKey={moduleId} />
+              <PdfSlideCanvas
+                url={pdfUrl}
+                pageNumber={slideIdx}
+                cacheKey={moduleId}
+              />
             </div>
             {status === "loading" && (
               <div className="absolute bottom-3 right-4 text-[10px] uppercase tracking-wider text-white/70 animate-pulse">
@@ -520,10 +553,13 @@ function PitchPlayer(props: PlayerProps) {
         <>
           <BackBar title={`${courseTitle} · ${deckName}`} />
 
-          {/* Slide canvas */}
           <Card className="overflow-hidden">
             <div className="relative aspect-video bg-black/5">
-              <PdfSlideCanvas url={pdfUrl} pageNumber={slideIdx} cacheKey={moduleId} />
+              <PdfSlideCanvas
+                url={pdfUrl}
+                pageNumber={slideIdx}
+                cacheKey={moduleId}
+              />
               {status === "loading" && (
                 <div className="absolute bottom-3 right-4 text-[10px] uppercase tracking-wider text-muted-foreground animate-pulse">
                   Loading voiceover…
@@ -548,24 +584,20 @@ function PitchPlayer(props: PlayerProps) {
             </div>
           </Card>
 
-          {/* Transport */}
           <Card>
             <CardContent className="flex flex-wrap items-center gap-2 py-3">
               {transport}
             </CardContent>
           </Card>
 
-          {/* Slide duration for this pitch */}
           <Card>
             <CardHeader className="flex flex-row items-start justify-between gap-3 pb-3">
               <div>
-                <CardTitle className="text-base">
-                  Slide duration
-                </CardTitle>
+                <CardTitle className="text-base">Slide duration</CardTitle>
                 <p className="text-xs text-muted-foreground mt-1 max-w-2xl">
-                  How long slide #{slideIdx} holds before advancing. Shared
-                  with everyone who plays this course. Narration always uses
-                  the same voice at normal speed.
+                  How long slide #{slideIdx} holds before advancing. Shared with
+                  everyone who plays this course. Narration always uses the same
+                  voice at normal speed.
                 </p>
               </div>
               <Badge variant="secondary" className="shrink-0">
@@ -612,7 +644,6 @@ function PitchPlayer(props: PlayerProps) {
             </CardContent>
           </Card>
 
-          {/* Speaker notes (read-only) */}
           <Card>
             <CardHeader className="flex flex-row items-center justify-between pb-3">
               <CardTitle className="text-[11px] uppercase tracking-wider text-muted-foreground">
@@ -641,7 +672,6 @@ function PitchPlayer(props: PlayerProps) {
             </CardContent>
           </Card>
 
-          {/* Quick jump grid */}
           <Card>
             <CardHeader className="pb-3">
               <CardTitle className="text-sm">Quick jump</CardTitle>
