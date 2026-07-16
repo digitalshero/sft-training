@@ -197,7 +197,7 @@ function HomePage() {
             />
             <ContactCard
               region="USA"
-              flagSrc="/usa%20flag.png"
+              flagSrc="/usaa.png"
               email="support@shero.us"
               whatsappLabel="+1 443 801 1011"
               whatsappHref="https://wa.me/14438011011"
