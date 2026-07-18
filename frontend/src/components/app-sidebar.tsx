@@ -1,4 +1,5 @@
 import { Link, useNavigate, useRouterState } from "@tanstack/react-router";
+import { toast } from "sonner";
 import {
   BookOpen,
   LayoutDashboard,
@@ -351,10 +352,15 @@ export function AppSidebar() {
       </SidebarContent>
 
       <SidebarFooter>
-        {isLearnPage && !collapsed && (
-          <a
-            href="mailto:support@shero.in"
-            className="flex items-center gap-2.5 rounded-2xl border border-sidebar-border p-3 transition-colors hover:bg-sidebar-accent/50"
+        {inPartnerMode && !collapsed && (
+          <button
+            type="button"
+            onClick={() =>
+              toast.info(
+                "For any concerns or queries regarding SFT please Whatsapp - +1 (443) 801-1011",
+              )
+            }
+            className="flex w-full items-center gap-2.5 rounded-2xl border border-sidebar-border p-3 text-left transition-colors hover:bg-sidebar-accent/50"
           >
             <span className="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-primary/10 text-primary">
               <Headphones className="h-4 w-4" />
@@ -367,7 +373,7 @@ export function AppSidebar() {
                 Contact support anytime.
               </span>
             </span>
-          </a>
+          </button>
         )}
         {inPartnerMode && !isLearnPage && !collapsed && (
           <div className="rounded-2xl bg-primary p-4 text-primary-foreground">
