@@ -835,6 +835,24 @@ model LpRecipeAssignment {
   @@map("lp_recipe_assignments")
 }
 
+// Durable per-product draft: lets a partner upload/submit one assigned
+// product at a time, persisting across logout/refresh, before everything
+// is bundled into the existing LpProductSubmission via Final Submit.
+model LpProductUploadDraft {
+  id           String    @id @default(uuid())
+  userId       String    @map("user_id")
+  courseId     String    @map("course_id")
+  assignmentId String    @unique @map("assignment_id")
+  files        Json      @default("[]")
+  status       String    @default("pending")
+  submittedAt  DateTime? @map("submitted_at")
+  createdAt    DateTime  @default(now()) @map("created_at")
+  updatedAt    DateTime  @updatedAt @map("updated_at")
+
+  @@index([userId, courseId])
+  @@map("lp_product_upload_drafts")
+}
+
 // ─── Physical Visits ──────────────────────────────────────────────────────────
 
 model LpPhysicalVisit {

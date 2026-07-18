@@ -44,3 +44,11 @@ export const removeCuisine = (d: { course_id: string; cuisineId: string }) =>
     .then((r) => r.data);
 export const submitCookUploads = (d: { course_id: string; files: unknown[]; notes?: string }) =>
   api.post(`/partner/courses/${d.course_id}/submit-cook`, d).then((r) => r.data);
+export const uploadCookDraft = (d: { course_id: string; assignmentId: string; path: string }) =>
+  api
+    .post(`/partner/courses/${d.course_id}/cook-drafts/${d.assignmentId}/upload`, { path: d.path })
+    .then((r) => r.data);
+export const submitCookDraft = (d: { course_id: string; assignmentId: string }) =>
+  api
+    .post(`/partner/courses/${d.course_id}/cook-drafts/${d.assignmentId}/submit`)
+    .then((r) => r.data);

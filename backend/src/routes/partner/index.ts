@@ -395,6 +395,11 @@ partnerRoutes.get('/courses/:courseId/my-cook-assignments', async (req: Request,
       where: { userId, courseId }, orderBy: { submittedAt: 'desc' },
     });
 
+    const drafts = await prisma.lpProductUploadDraft.findMany({
+      where: { assignmentId: { in: assignments.map(a => a.id) } },
+    });
+    const draftByAssignment = new Map(drafts.map(d => [d.assignmentId, d]));
+
     // A product can now have multiple uploaded photos. Group each submission's
     // files by label first, then — same as before — the most recent submission
     // that has any files for a given label wins (older submissions only fill in
@@ -438,6 +443,14 @@ partnerRoutes.get('/courses/:courseId/my-cook-assignments', async (req: Request,
         decision: f.decision ?? null,
         remark:   f.remark ?? null,
       })));
+
+      const draft = draftByAssignment.get(a.id);
+      const draftFiles = (draft?.files as Array<{ path: string }>) ?? [];
+      const draftUploads = await Promise.all(draftFiles.map(async f => ({
+        path: f.path,
+        url:  await createSignedUrl('sft-practice', f.path),
+      })));
+
       return {
         assignment_id: a.id,
         recipe_id:     a.recipeId,
@@ -450,6 +463,8 @@ partnerRoutes.get('/courses/:courseId/my-cook-assignments', async (req: Request,
         image_url:      recipe?.imagePath ? await createSignedUrl('learning-media', recipe.imagePath) : null,
         uploads,
         status,
+        draft_status:  draft?.status ?? 'none',
+        draft_uploads: draftUploads,
         admin_comment:
           uploads.find(u => u.remark)?.remark ??
           labelToOverallFeedback.get(label) ??
@@ -483,6 +498,9 @@ partnerRoutes.post('/courses/:courseId/cuisines/:cuisineId/remove', async (req: 
       .map(a => a.id);
     if (!toDelete.length) { res.status(404).json({ error: 'No products assigned for this cuisine' }); return; }
 
+    const draftExists = await prisma.lpProductUploadDraft.findFirst({ where: { assignmentId: { in: toDelete } } });
+    if (draftExists) { res.status(400).json({ error: 'Cannot change cuisines after uploading' }); return; }
+
     await prisma.lpProductAssignment.deleteMany({ where: { id: { in: toDelete } } });
     res.json({ ok: true, removed: toDelete.length });
   } catch (e) { next(e); }
@@ -494,6 +512,10 @@ partnerRoutes.post('/courses/:courseId/reset-cuisine', async (req: Request, res:
     const courseId = req.params.courseId;
     const subs = await prisma.lpProductSubmission.findFirst({ where: { userId, courseId } });
     if (subs) { res.status(400).json({ error: 'Reset disabled after uploading' }); return; }
+
+    const draftExists = await prisma.lpProductUploadDraft.findFirst({ where: { userId, courseId } });
+    if (draftExists) { res.status(400).json({ error: 'Reset disabled after uploading' }); return; }
+
     await prisma.lpProductAssignment.deleteMany({ where: { userId, courseId } });
     res.json({ ok: true });
   } catch (e) { next(e); }
@@ -510,6 +532,56 @@ partnerRoutes.post('/courses/:courseId/submit-cook', async (req: Request, res: R
       data: { courseId, userId, eventType: 'product_submitted', payload: { submission_id: sub.id, file_count: req.body.files?.length ?? 0 } },
     });
     res.status(201).json({ id: sub.id });
+  } catch (e) { next(e); }
+});
+
+// ── Per-product upload drafts ──────────────────────────────────────────────────
+// Lets a partner upload/submit one assigned product at a time, persisting
+// across logout/refresh. These drafts are the partner's own working copy —
+// they only become an admin-reviewable LpProductSubmission once Final Submit
+// bundles every assignment's uploads via the existing /submit-cook above.
+
+partnerRoutes.post('/courses/:courseId/cook-drafts/:assignmentId/upload', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const userId   = (req as AuthRequest).user.id;
+    const courseId = req.params.courseId;
+    const { assignmentId } = req.params;
+    const { path: filePath } = req.body as { path?: string };
+    if (!filePath) { res.status(400).json({ error: 'path required' }); return; }
+
+    const assignment = await prisma.lpProductAssignment.findFirst({ where: { id: assignmentId, userId, courseId } });
+    if (!assignment) { res.status(404).json({ error: 'Assignment not found' }); return; }
+
+    const existing = await prisma.lpProductUploadDraft.findUnique({ where: { assignmentId } });
+    const files = [...((existing?.files as Array<{ path: string }>) ?? []), { path: filePath }];
+
+    const draft = await prisma.lpProductUploadDraft.upsert({
+      where:  { assignmentId },
+      create: { userId, courseId, assignmentId, files },
+      update: { files },
+    });
+    res.status(201).json({ id: draft.id, status: draft.status, files: draft.files });
+  } catch (e) { next(e); }
+});
+
+partnerRoutes.post('/courses/:courseId/cook-drafts/:assignmentId/submit', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const userId   = (req as AuthRequest).user.id;
+    const courseId = req.params.courseId;
+    const { assignmentId } = req.params;
+
+    const assignment = await prisma.lpProductAssignment.findFirst({ where: { id: assignmentId, userId, courseId } });
+    if (!assignment) { res.status(404).json({ error: 'Assignment not found' }); return; }
+
+    const draft = await prisma.lpProductUploadDraft.findUnique({ where: { assignmentId } });
+    const fileCount = ((draft?.files as unknown[]) ?? []).length;
+    if (!draft || fileCount === 0) { res.status(400).json({ error: 'Upload at least one photo before submitting' }); return; }
+
+    const updated = await prisma.lpProductUploadDraft.update({
+      where: { assignmentId },
+      data:  { status: 'submitted', submittedAt: new Date() },
+    });
+    res.json({ id: updated.id, status: updated.status });
   } catch (e) { next(e); }
 });
 

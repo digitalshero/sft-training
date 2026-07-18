@@ -42,7 +42,6 @@ import {
   ClipboardCheck,
   ChevronDown,
   Info,
-  Trash2,
 } from "lucide-react";
 import { UploadPanel } from "@/components/partner/upload-panel";
 import {
@@ -55,6 +54,8 @@ import {
   chooseCuisine,
   removeCuisine,
   submitCookUploads,
+  uploadCookDraft,
+  submitCookDraft,
 } from "@/lib/learning/cuisines.functions";
 import type { Cuisine } from "@/lib/learning/cuisines.functions";
 import { useClearNotificationsOnVisit } from "@/lib/partner/notifications.functions";
@@ -68,7 +69,10 @@ type ProductUpload = {
   remark: string | null;
 };
 
+type DraftUpload = { path: string; url: string };
+
 type PartnerAssignedRecipe = {
+  assignment_id: string;
   recipe_id: string;
   cuisine_id: string;
   cuisine_name: string;
@@ -76,11 +80,24 @@ type PartnerAssignedRecipe = {
   status: string;
   admin_comment?: string | null;
   uploads: ProductUpload[];
+  draft_status: "none" | "pending" | "submitted";
+  draft_uploads: DraftUpload[];
   image_url?: string | null;
   ingredients_md: string;
   prep_steps_md: string | null;
   cook_steps_md: string | null;
 };
+
+// A product needs no further action from the partner right now once an admin
+// has already approved it, it's sitting inside a submission awaiting admin
+// review, or the partner has submitted their draft for it. "redo" always
+// needs action, even if a prior round's draft was submitted — that's what
+// reopens it for a fresh photo + resubmission.
+function isProductResolved(a: PartnerAssignedRecipe): boolean {
+  if (a.status === "redo") return false;
+  if (a.status === "approved" || a.status === "pending") return true;
+  return a.draft_status === "submitted";
+}
 
 function CookHero() {
   return (
@@ -248,7 +265,11 @@ function CuisineCookView({
   const maxCuisines = cuisinesQ.data?.max_cuisines ?? null;
   const chosenCuisineIds = new Set(assignments.map((a) => a.cuisine_id));
   const atLimit = maxCuisines != null && chosenCuisineIds.size >= maxCuisines;
-  const canRemove = !isCertified && assignments.every((a) => a.status === "not_uploaded");
+  const canRemove =
+    !isCertified &&
+    assignments.every(
+      (a) => a.status === "not_uploaded" && a.draft_status === "none",
+    );
 
   return (
     <div className="space-y-5">
@@ -390,40 +411,40 @@ function CuisinePicker({
   );
 }
 
-function StatusBadge({
-  status,
-  staged = false,
-}: {
-  status: string;
-  staged?: boolean;
-}) {
-  if (status === "approved")
+function StatusBadge({ item }: { item: PartnerAssignedRecipe }) {
+  if (item.status === "approved")
     return (
       <Badge className="gap-1 bg-success/15 text-success border-success/30">
         <CheckCircle2 className="h-3 w-3" /> Approved
       </Badge>
     );
-  if (status === "pending")
+  if (item.status === "redo")
+    return (
+      <Badge variant="destructive" className="gap-1">
+        <RotateCcw className="h-3 w-3" /> Redo Required
+      </Badge>
+    );
+  if (item.status === "pending")
     return (
       <Badge variant="secondary" className="gap-1">
         <Loader2 className="h-3 w-3" /> Pending review
       </Badge>
     );
-  // Not submitted yet, but a photo has been picked in this session — distinct
-  // from "Not uploaded" so the checklist reflects local progress right away.
-  if (staged)
+  // Product-level submit already clicked, waiting on Final Submit — distinct
+  // from an admin-side "Pending review" (that only starts after Final Submit).
+  if (item.draft_status === "submitted")
+    return (
+      <Badge className="gap-1 bg-success/15 text-success border-success/30">
+        <CheckCircle2 className="h-3 w-3" /> Submitted
+      </Badge>
+    );
+  if (item.draft_uploads.length > 0)
     return (
       <Badge className="gap-1 bg-success/15 text-success border-success/30">
         <CheckCircle2 className="h-3 w-3" /> Uploaded
       </Badge>
     );
-  if (status === "redo")
-    return (
-      <Badge variant="destructive" className="gap-1">
-        <RotateCcw className="h-3 w-3" /> Redo
-      </Badge>
-    );
-  return <Badge variant="outline">Not uploaded</Badge>;
+  return <Badge variant="outline">Pending</Badge>;
 }
 
 function ProductChecklist({
@@ -436,43 +457,61 @@ function ProductChecklist({
   locked?: boolean;
 }) {
   const qc = useQueryClient();
-  const fnSubmit = submitCookUploads;
   const multiCuisine = new Set(assignments.map((a) => a.cuisine_name)).size > 1;
 
   const [guideOpen, setGuideOpen] = useState(false);
   const [recipeOpen, setRecipeOpen] = useState<PartnerAssignedRecipe | null>(
     null,
   );
-  // pendingUploads: recipe_id -> photos uploaded but not yet submitted (a
-  // product can have more than one photo).
-  const [pending, setPending] = useState<
-    Record<string, Array<{ path: string; previewUrl: string }>>
-  >({});
   const [activeId, setActiveId] = useState<string | null>(null);
 
-  // Filter to items needing upload: not_uploaded OR redo
-  const needsUpload = assignments.filter(
-    (a) => a.status === "not_uploaded" || a.status === "redo",
-  );
-  const allFilled = needsUpload.every(
-    (a) => (pending[a.recipe_id]?.length ?? 0) > 0,
-  );
+  const invalidate = () =>
+    qc.invalidateQueries({ queryKey: ["lp-cook-assignments", courseId] });
+
+  // Products still needing the partner's attention right now.
+  const actionable = assignments.filter((a) => !isProductResolved(a));
   const active =
     assignments.find((a) => a.recipe_id === activeId) ??
-    needsUpload[0] ??
+    actionable[0] ??
     assignments[0] ??
     null;
 
-  const submitM = useMutation({
+  const uploadDraftM = useMutation({
+    mutationFn: (vars: { assignmentId: string; path: string }) =>
+      uploadCookDraft({ course_id: courseId, ...vars }),
+    onSuccess: invalidate,
+    onError: (e: Error) => toast.error(e.message),
+  });
+
+  const submitDraftM = useMutation({
+    mutationFn: (assignmentId: string) =>
+      submitCookDraft({ course_id: courseId, assignmentId }),
+    onSuccess: (_data, assignmentId) => {
+      toast.success("Product submitted");
+      invalidate();
+      const submitted = assignments.find((a) => a.assignment_id === assignmentId);
+      const nextUp = actionable.find((a) => a.assignment_id !== assignmentId);
+      if (nextUp) {
+        setActiveId(nextUp.recipe_id);
+        if (submitted) {
+          toast.message(`Now upload ${nextUp.food_name}.`);
+        }
+      }
+    },
+    onError: (e: Error) => toast.error(e.message),
+  });
+
+  const finalSubmitM = useMutation({
     mutationFn: () => {
-      const files = Object.entries(pending).flatMap(([rid, photos]) => {
-        const a = assignments.find((x) => x.recipe_id === rid)!;
-        return photos.map((p) => ({
-          path: p.path,
-          label: `${a.cuisine_name} — ${a.food_name}`,
-        }));
-      });
-      return fnSubmit({ course_id: courseId, files });
+      const files = assignments
+        .filter((a) => a.status !== "approved")
+        .flatMap((a) =>
+          (a.draft_uploads.length ? a.draft_uploads : a.uploads).map((u) => ({
+            path: u.path,
+            label: `${a.cuisine_name} — ${a.food_name}`,
+          })),
+        );
+      return submitCookUploads({ course_id: courseId, files });
     },
     onSuccess: () => {
       confetti({
@@ -483,16 +522,17 @@ function ProductChecklist({
         zIndex: 100,
       });
       toast.success("Submitted for review");
-      setPending({});
-      qc.invalidateQueries({ queryKey: ["lp-cook-assignments", courseId] });
+      invalidate();
     },
     onError: (e: Error) => toast.error(e.message),
   });
 
-  const approvedCount = assignments.filter(
-    (a) => a.status === "approved",
-  ).length;
-  const allApproved = approvedCount === assignments.length;
+  const resolvedCount = assignments.filter(isProductResolved).length;
+  const allApproved =
+    assignments.length > 0 &&
+    assignments.every((a) => a.status === "approved");
+  const readyForFinalSubmit =
+    assignments.length > 0 && resolvedCount === assignments.length;
 
   return (
     <div className="space-y-5">
@@ -516,9 +556,8 @@ function ProductChecklist({
         <CardContent className="space-y-2.5">
           {assignments.map((a) => {
             const isActive = a.recipe_id === active?.recipe_id;
-            const staged = (pending[a.recipe_id]?.length ?? 0) > 0;
             const thumb =
-              pending[a.recipe_id]?.[0]?.previewUrl ??
+              a.draft_uploads[0]?.url ??
               a.uploads[0]?.url ??
               a.image_url ??
               null;
@@ -553,7 +592,7 @@ function ProductChecklist({
                     </span>
                   )}
                 </div>
-                <StatusBadge status={a.status} staged={staged} />
+                <StatusBadge item={a} />
                 <ChevronDown
                   className={`h-4 w-4 shrink-0 text-muted-foreground transition-transform ${
                     isActive ? "rotate-180" : ""
@@ -581,67 +620,39 @@ function ProductChecklist({
           >
             <UploadZone
               active={active}
-              pendingPhotos={pending[active.recipe_id] ?? []}
-              onUpload={(path, url) => {
-                setPending((p) => ({
-                  ...p,
-                  [active.recipe_id]: [
-                    ...(p[active.recipe_id] ?? []),
-                    { path, previewUrl: url },
-                  ],
-                }));
-                const nextUp = needsUpload.find(
-                  (a) =>
-                    a.recipe_id !== active.recipe_id &&
-                    !(pending[a.recipe_id]?.length),
-                );
-                if (nextUp) {
-                  setActiveId(nextUp.recipe_id);
-                  toast.success(
-                    `${active.food_name} photo added. Now upload ${nextUp.food_name}.`,
-                  );
-                }
-              }}
-              onRemove={(index) =>
-                setPending((p) => {
-                  const remaining = (p[active.recipe_id] ?? []).filter(
-                    (_, i) => i !== index,
-                  );
-                  const n = { ...p };
-                  if (remaining.length) n[active.recipe_id] = remaining;
-                  else delete n[active.recipe_id];
-                  return n;
-                })
+              uploading={
+                uploadDraftM.isPending &&
+                uploadDraftM.variables?.assignmentId === active.assignment_id
               }
-              onReupload={() =>
-                setPending((p) => {
-                  const n = { ...p };
-                  delete n[active.recipe_id];
-                  return n;
-                })
+              submitting={
+                submitDraftM.isPending &&
+                submitDraftM.variables === active.assignment_id
               }
+              onUpload={(path) =>
+                uploadDraftM.mutate({ assignmentId: active.assignment_id, path })
+              }
+              onSubmit={() => submitDraftM.mutate(active.assignment_id)}
             />
           </motion.div>
         )}
       </AnimatePresence>
 
-      {!locked && !allApproved && needsUpload.length > 0 && (
+      {!locked && !allApproved && assignments.length > 0 && (
         <Card className="rounded-2xl">
           <CardContent className="flex flex-wrap items-center justify-between gap-3 py-4">
             <div className="text-sm text-muted-foreground">
-              {Object.keys(pending).length} / {needsUpload.length} ready to
-              submit.
+              {resolvedCount} / {assignments.length} Completed
             </div>
             <Button
-              disabled={!allFilled || submitM.isPending}
-              onClick={() => submitM.mutate()}
+              disabled={!readyForFinalSubmit || finalSubmitM.isPending}
+              onClick={() => finalSubmitM.mutate()}
             >
-              {submitM.isPending ? (
+              {finalSubmitM.isPending ? (
                 <Loader2 className="h-4 w-4 animate-spin" />
               ) : (
                 <ClipboardCheck className="h-4 w-4" />
               )}
-              Submit for Review
+              Final Submit
             </Button>
           </CardContent>
         </Card>
@@ -729,16 +740,16 @@ async function checkImageQuality(
 
 function UploadZone({
   active,
-  pendingPhotos,
+  uploading: persisting,
+  submitting,
   onUpload,
-  onRemove,
-  onReupload,
+  onSubmit,
 }: {
   active: PartnerAssignedRecipe;
-  pendingPhotos: Array<{ path: string; previewUrl: string }>;
-  onUpload: (path: string, url: string) => void;
-  onRemove: (index: number) => void;
-  onReupload: () => void;
+  uploading: boolean;
+  submitting: boolean;
+  onUpload: (path: string) => void;
+  onSubmit: () => void;
 }) {
   const [uploading, setUploading] = useState(false);
   const [validating, setValidating] = useState(false);
@@ -798,11 +809,7 @@ function UploadZone({
         return; // uploaded file stays in storage but is never committed — cleaned up by maintenance
       }
 
-      const signedUrlRes = await api.post("/sft/storage/signed-url", {
-        bucket: "sft-practice",
-        path,
-      });
-      onUpload(path, signedUrlRes.data?.url ?? URL.createObjectURL(file));
+      onUpload(path);
     } catch (e) {
       toast.error((e as Error).message);
     } finally {
@@ -812,7 +819,7 @@ function UploadZone({
     }
   }
 
-  const locked = active.status === "approved" || active.status === "pending";
+  const locked = isProductResolved(active);
 
   return (
     <Card className="rounded-2xl">
@@ -846,9 +853,15 @@ function UploadZone({
 
         {locked ? (
           <>
-            {active.uploads.length > 0 && (
+            {(active.draft_uploads.length > 0
+              ? active.draft_uploads
+              : active.uploads
+            ).length > 0 && (
               <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-                {active.uploads.map((u) => (
+                {(active.draft_uploads.length > 0
+                  ? active.draft_uploads
+                  : active.uploads
+                ).map((u) => (
                   <div
                     key={u.path}
                     className="aspect-4/3 overflow-hidden rounded-xl border border-border"
@@ -865,50 +878,47 @@ function UploadZone({
             <div className="grid place-items-center rounded-xl border border-border bg-muted/20 p-4 text-center text-xs text-muted-foreground">
               {active.status === "approved"
                 ? "Approved — no changes needed."
-                : "Submitted — awaiting review."}
+                : active.status === "pending"
+                  ? "Submitted — awaiting review."
+                  : "Submitted — click Final Submit below once every product is ready."}
             </div>
           </>
         ) : (
           <>
             <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-              {pendingPhotos.map((p, i) => (
+              {active.draft_uploads.map((u) => (
                 <div
-                  key={p.path}
-                  className="relative aspect-4/3 overflow-hidden rounded-xl border border-border"
+                  key={u.path}
+                  className="aspect-4/3 overflow-hidden rounded-xl border border-border"
                 >
                   <img
-                    src={p.previewUrl}
+                    src={u.url}
                     alt={active.food_name}
                     className="h-full w-full object-cover"
                   />
-                  <button
-                    type="button"
-                    onClick={() => onRemove(i)}
-                    className="absolute right-1 top-1 rounded-full bg-background/80 p-1 text-destructive hover:bg-background"
-                  >
-                    <Trash2 className="h-3.5 w-3.5" />
-                  </button>
                 </div>
               ))}
               <label
                 className={`grid aspect-4/3 cursor-pointer place-items-center rounded-xl border border-dashed border-success/40 bg-success/5 text-center transition hover:bg-success/10 ${
-                  uploading || validating ? "pointer-events-none opacity-60" : ""
+                  uploading || validating || persisting
+                    ? "pointer-events-none opacity-60"
+                    : ""
                 }`}
               >
                 <input
                   type="file"
                   accept="image/*"
                   className="hidden"
-                  disabled={uploading || validating}
+                  disabled={uploading || validating || persisting}
                   onChange={(e) => e.target.files?.[0] && pick(e.target.files[0])}
                 />
-                {uploading || validating ? (
+                {uploading || validating || persisting ? (
                   <Loader2 className="h-6 w-6 animate-spin text-success" />
                 ) : (
                   <>
                     <UploadCloud className="h-6 w-6 text-success" />
                     <span className="mt-1 text-xs font-semibold text-success">
-                      {pendingPhotos.length ? "Add another" : "Choose image"}
+                      {active.draft_uploads.length ? "Add another" : "Choose image"}
                     </span>
                   </>
                 )}
@@ -919,17 +929,6 @@ function UploadZone({
                 Checking image clarity &amp; format…
               </p>
             )}
-            {pendingPhotos.length > 0 && !uploading && !validating && (
-              <Button
-                size="sm"
-                variant="ghost"
-                className="mx-auto flex text-xs text-muted-foreground hover:text-destructive"
-                onClick={onReupload}
-              >
-                <RotateCcw className="h-3.5 w-3.5" /> Re-upload (clear all
-                photos for this product)
-              </Button>
-            )}
             <p className="text-center text-xs text-muted-foreground">
               JPG, PNG up to {MAX_SIZE_MB}MB each — upload as many as you need.
             </p>
@@ -937,6 +936,18 @@ function UploadZone({
               <Info className="mt-0.5 h-3.5 w-3.5 shrink-0" />
               Make sure each image is clear and well-lit for faster approval.
             </div>
+            <Button
+              className="w-full"
+              disabled={active.draft_uploads.length === 0 || submitting}
+              onClick={onSubmit}
+            >
+              {submitting ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <ClipboardCheck className="h-4 w-4" />
+              )}
+              Submit {active.food_name}
+            </Button>
           </>
         )}
       </CardContent>
@@ -1083,7 +1094,7 @@ function ApprovedDialog({ open }: { open: boolean }) {
       icon={PartyPopper}
       title="Congratulations!"
       description="You have successfully completed your cooking assessment."
-      body="You are now eligible for the Physical Visit verification. Our team will schedule your visit soon — you'll get the details by email and on your dashboard."
+      body="Would you like to select another cuisine, or proceed to your Physical Visit?"
       footer={
         <>
           <Button
@@ -1091,7 +1102,7 @@ function ApprovedDialog({ open }: { open: boolean }) {
             className={celebrationButtonClass}
             onClick={() => setShown(false)}
           >
-            OK
+            Yes — Select Another Cuisine
           </Button>
           <Button
             className={celebrationButtonClass}
@@ -1100,7 +1111,7 @@ function ApprovedDialog({ open }: { open: boolean }) {
               navigate({ to: "/partner/visit" });
             }}
           >
-            View Physical Visit
+            No — Physical Visit
           </Button>
         </>
       }
