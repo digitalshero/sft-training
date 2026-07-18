@@ -1,7 +1,7 @@
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { uploadToStorage } from "@/lib/api/storage";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { motion, AnimatePresence } from "framer-motion";
 import confetti from "canvas-confetti";
@@ -464,6 +464,20 @@ function ProductChecklist({
     null,
   );
   const [activeId, setActiveId] = useState<string | null>(null);
+  const [highlightId, setHighlightId] = useState<string | null>(null);
+  const uploadSectionRef = useRef<HTMLDivElement>(null);
+
+  // Clicking a product card sets activeId — scroll its upload section into
+  // view and briefly highlight it so the partner can see where they landed.
+  useEffect(() => {
+    if (!activeId) return;
+    uploadSectionRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    setHighlightId(activeId);
+    const t = setTimeout(() => {
+      setHighlightId((h) => (h === activeId ? null : h));
+    }, 1500);
+    return () => clearTimeout(t);
+  }, [activeId]);
 
   const invalidate = () =>
     qc.invalidateQueries({ queryKey: ["lp-cook-assignments", courseId] });
@@ -613,10 +627,17 @@ function ProductChecklist({
         {active && (
           <motion.div
             key={active.recipe_id}
+            id={`upload-section-${active.recipe_id}`}
+            ref={uploadSectionRef}
             initial={{ opacity: 0, height: 0 }}
             animate={{ opacity: 1, height: "auto" }}
             exit={{ opacity: 0, height: 0 }}
             transition={{ duration: 0.3 }}
+            className={`rounded-2xl transition-shadow duration-500 ${
+              highlightId === active.recipe_id
+                ? "ring-2 ring-success ring-offset-4 ring-offset-background"
+                : ""
+            }`}
           >
             <UploadZone
               active={active}
