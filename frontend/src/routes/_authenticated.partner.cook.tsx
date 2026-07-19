@@ -1,7 +1,7 @@
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { uploadToStorage } from "@/lib/api/storage";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { motion, AnimatePresence } from "framer-motion";
 import confetti from "canvas-confetti";
@@ -42,6 +42,7 @@ import {
   ClipboardCheck,
   ChevronDown,
   Info,
+  Trash2,
 } from "lucide-react";
 import { UploadPanel } from "@/components/partner/upload-panel";
 import {
@@ -56,6 +57,7 @@ import {
   submitCookUploads,
   uploadCookDraft,
   submitCookDraft,
+  removeCookDraftImage,
 } from "@/lib/learning/cuisines.functions";
 import type { Cuisine } from "@/lib/learning/cuisines.functions";
 import { useClearNotificationsOnVisit } from "@/lib/partner/notifications.functions";
@@ -497,6 +499,13 @@ function ProductChecklist({
     onError: (e: Error) => toast.error(e.message),
   });
 
+  const removeImageM = useMutation({
+    mutationFn: (vars: { assignmentId: string; path: string }) =>
+      removeCookDraftImage({ course_id: courseId, ...vars }),
+    onSuccess: invalidate,
+    onError: (e: Error) => toast.error(e.message),
+  });
+
   const submitDraftM = useMutation({
     mutationFn: (assignmentId: string) =>
       submitCookDraft({ course_id: courseId, assignmentId }),
@@ -576,43 +585,85 @@ function ProductChecklist({
               a.image_url ??
               null;
             return (
-              <button
-                key={a.recipe_id}
-                onClick={() => setActiveId(a.recipe_id)}
-                className={`flex w-full items-center gap-3 rounded-xl border p-3 text-left transition ${
-                  isActive
-                    ? "border-success/50 bg-success/5"
-                    : "border-border bg-card hover:bg-muted/30"
-                }`}
-              >
-                <div className="grid h-10 w-10 shrink-0 place-items-center overflow-hidden rounded-lg bg-muted">
-                  {thumb ? (
-                    <img
-                      src={thumb}
-                      alt=""
-                      className="h-full w-full object-cover"
-                    />
-                  ) : (
-                    <ChefHat className="h-4 w-4 text-muted-foreground" />
-                  )}
-                </div>
-                <div className="min-w-0 flex-1">
-                  <div className="truncate text-sm font-semibold">
-                    {a.food_name}
-                  </div>
-                  {multiCuisine && (
-                    <span className="mt-0.5 inline-flex items-center rounded-full bg-success/10 px-2 py-0.5 text-[0.65rem] font-medium text-success">
-                      {a.cuisine_name}
-                    </span>
-                  )}
-                </div>
-                <StatusBadge item={a} />
-                <ChevronDown
-                  className={`h-4 w-4 shrink-0 text-muted-foreground transition-transform ${
-                    isActive ? "rotate-180" : ""
+              <Fragment key={a.recipe_id}>
+                <button
+                  onClick={() => setActiveId(a.recipe_id)}
+                  className={`flex w-full items-center gap-3 rounded-xl border p-3 text-left transition ${
+                    isActive
+                      ? "border-success/50 bg-success/5"
+                      : "border-border bg-card hover:bg-muted/30"
                   }`}
-                />
-              </button>
+                >
+                  <div className="grid h-10 w-10 shrink-0 place-items-center overflow-hidden rounded-lg bg-muted">
+                    {thumb ? (
+                      <img
+                        src={thumb}
+                        alt=""
+                        className="h-full w-full object-cover"
+                      />
+                    ) : (
+                      <ChefHat className="h-4 w-4 text-muted-foreground" />
+                    )}
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <div className="truncate text-sm font-semibold">
+                      {a.food_name}
+                    </div>
+                    {multiCuisine && (
+                      <span className="mt-0.5 inline-flex items-center rounded-full bg-success/10 px-2 py-0.5 text-[0.65rem] font-medium text-success">
+                        {a.cuisine_name}
+                      </span>
+                    )}
+                  </div>
+                  <StatusBadge item={a} />
+                  <ChevronDown
+                    className={`h-4 w-4 shrink-0 text-muted-foreground transition-transform ${
+                      isActive ? "rotate-180" : ""
+                    }`}
+                  />
+                </button>
+
+                <AnimatePresence>
+                  {isActive && (
+                    <motion.div
+                      id={`upload-section-${a.recipe_id}`}
+                      ref={uploadSectionRef}
+                      initial={{ opacity: 0, height: 0 }}
+                      animate={{ opacity: 1, height: "auto" }}
+                      exit={{ opacity: 0, height: 0 }}
+                      transition={{ duration: 0.3 }}
+                      className={`overflow-hidden rounded-2xl transition-shadow duration-500 ${
+                        highlightId === a.recipe_id
+                          ? "ring-2 ring-success ring-offset-4 ring-offset-background"
+                          : ""
+                      }`}
+                    >
+                      <UploadZone
+                        active={a}
+                        uploading={
+                          uploadDraftM.isPending &&
+                          uploadDraftM.variables?.assignmentId === a.assignment_id
+                        }
+                        submitting={
+                          submitDraftM.isPending &&
+                          submitDraftM.variables === a.assignment_id
+                        }
+                        removing={
+                          removeImageM.isPending &&
+                          removeImageM.variables?.assignmentId === a.assignment_id
+                        }
+                        onUpload={(path) =>
+                          uploadDraftM.mutate({ assignmentId: a.assignment_id, path })
+                        }
+                        onRemoveImage={(path) =>
+                          removeImageM.mutate({ assignmentId: a.assignment_id, path })
+                        }
+                        onSubmit={() => submitDraftM.mutate(a.assignment_id)}
+                      />
+                    </motion.div>
+                  )}
+                </AnimatePresence>
+              </Fragment>
             );
           })}
           {assignments.length === 0 && (
@@ -622,41 +673,6 @@ function ProductChecklist({
           )}
         </CardContent>
       </Card>
-
-      <AnimatePresence mode="popLayout">
-        {active && (
-          <motion.div
-            key={active.recipe_id}
-            id={`upload-section-${active.recipe_id}`}
-            ref={uploadSectionRef}
-            initial={{ opacity: 0, height: 0 }}
-            animate={{ opacity: 1, height: "auto" }}
-            exit={{ opacity: 0, height: 0 }}
-            transition={{ duration: 0.3 }}
-            className={`rounded-2xl transition-shadow duration-500 ${
-              highlightId === active.recipe_id
-                ? "ring-2 ring-success ring-offset-4 ring-offset-background"
-                : ""
-            }`}
-          >
-            <UploadZone
-              active={active}
-              uploading={
-                uploadDraftM.isPending &&
-                uploadDraftM.variables?.assignmentId === active.assignment_id
-              }
-              submitting={
-                submitDraftM.isPending &&
-                submitDraftM.variables === active.assignment_id
-              }
-              onUpload={(path) =>
-                uploadDraftM.mutate({ assignmentId: active.assignment_id, path })
-              }
-              onSubmit={() => submitDraftM.mutate(active.assignment_id)}
-            />
-          </motion.div>
-        )}
-      </AnimatePresence>
 
       {!locked && !allApproved && assignments.length > 0 && (
         <Card className="rounded-2xl">
@@ -763,13 +779,17 @@ function UploadZone({
   active,
   uploading: persisting,
   submitting,
+  removing,
   onUpload,
+  onRemoveImage,
   onSubmit,
 }: {
   active: PartnerAssignedRecipe;
   uploading: boolean;
   submitting: boolean;
+  removing: boolean;
   onUpload: (path: string) => void;
+  onRemoveImage: (path: string) => void;
   onSubmit: () => void;
 }) {
   const [uploading, setUploading] = useState(false);
@@ -910,13 +930,21 @@ function UploadZone({
               {active.draft_uploads.map((u) => (
                 <div
                   key={u.path}
-                  className="aspect-4/3 overflow-hidden rounded-xl border border-border"
+                  className="relative aspect-4/3 overflow-hidden rounded-xl border border-border"
                 >
                   <img
                     src={u.url}
                     alt={active.food_name}
                     className="h-full w-full object-cover"
                   />
+                  <button
+                    type="button"
+                    disabled={removing}
+                    onClick={() => onRemoveImage(u.path)}
+                    className="absolute right-1 top-1 rounded-full bg-background/80 p-1 text-destructive hover:bg-background disabled:opacity-50"
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                  </button>
                 </div>
               ))}
               <label

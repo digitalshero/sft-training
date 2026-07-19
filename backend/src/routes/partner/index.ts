@@ -44,7 +44,7 @@ partnerRoutes.get('/dashboard', async (req: Request, res: Response, next: NextFu
     const inviteIds  = invites.map(i => i.id);
 
     // Independent reads/writes — fire together instead of one round-trip at a time.
-    const [courses, tasks, certs, extraCerts, mods, subs, doneModuleIds] = await Promise.all([
+    const [courses, tasks, certs, extraCerts, mods, subs, doneModuleIds, , assignments, recipes, cuisines] = await Promise.all([
       courseIds.length ? prisma.lpCourse.findMany({ where: { id: { in: courseIds } }, select: { id: true, title: true, coverUrl: true, certificateTemplate: true, certificateTemplates: true } }) : [],
       inviteIds.length ? prisma.sftPartnerTask.findMany({ where: { inviteId: { in: inviteIds } }, orderBy: { createdAt: 'desc' } }) : [],
       courseIds.length ? prisma.lpCertificate.findMany({ where: { userId, courseId: { in: courseIds } } }) : [],
@@ -61,6 +61,11 @@ partnerRoutes.get('/dashboard', async (req: Request, res: Response, next: NextFu
           update: {},
         })
       )) : [],
+      // Cuisine/product-assignment model — needed to compute a correct
+      // "all assigned products approved" submission_status per course below.
+      courseIds.length ? prisma.lpProductAssignment.findMany({ where: { userId, courseId: { in: courseIds } } }) : [],
+      courseIds.length ? prisma.lpRecipe.findMany({ where: { courseId: { in: courseIds } } }) : [],
+      courseIds.length ? prisma.lpCuisine.findMany({ where: { courseId: { in: courseIds } } }) : [],
     ]);
 
     const courseMap = new Map<string, { id: string; title: string; coverUrl: string | null }>((courses as Array<{ id: string; title: string; coverUrl: string | null }>).map(c => [c.id, c]));
@@ -84,15 +89,63 @@ partnerRoutes.get('/dashboard', async (req: Request, res: Response, next: NextFu
 
       const doneSet = new Set(doneModuleIds.map(p => p.moduleId));
 
+      // Legacy fallback (courses with no cuisine/product-assignment model):
+      // unchanged "latest submission's status" calculation, exactly as before.
       const latestSub = new Map<string, string>();
       subs.forEach(s => { if (!latestSub.has(s.courseId)) latestSub.set(s.courseId, s.status); });
 
+      // Cuisine-model courses: submission_status must mean "every assigned
+      // product is approved," not "the single latest submission row is
+      // approved" — per-product submissions can now exist independently and
+      // in parallel before all products are done, so picking just the latest
+      // one could wrongly report "approved" after only one product is.
+      const assignmentsByCourse = new Map<string, typeof assignments>();
+      assignments.forEach(a => { const arr = assignmentsByCourse.get(a.courseId) ?? []; arr.push(a); assignmentsByCourse.set(a.courseId, arr); });
+      const recipeMap = new Map(recipes.map(r => [r.id, r] as const));
+      const cuisineMap = new Map(cuisines.map(c => [c.id, c] as const));
+      const subsByCourse = new Map<string, typeof subs>();
+      subs.forEach(s => { const arr = subsByCourse.get(s.courseId) ?? []; arr.push(s); subsByCourse.set(s.courseId, arr); });
+
+      type SubFile = { label?: string; decision?: string };
+      const resolveAssignmentStatus = (label: string, subsForCourse: typeof subs): string => {
+        for (const s of subsForCourse) { // newest-first (subs query ordered submittedAt desc)
+          const files = ((s.files as SubFile[]) ?? []).filter(f => f.label === label);
+          if (!files.length) continue;
+          if (files.some(f => f.decision === 'redo')) return 'redo';
+          if (files.every(f => f.decision === 'approved')) return 'approved';
+          return 'pending';
+        }
+        return 'not_uploaded';
+      };
+
       (courseIds as string[]).forEach((cid: string) => {
         const modIds = modsByCourse.get(cid) ?? [];
+        const courseAssignments = assignmentsByCourse.get(cid) ?? [];
+
+        let submissionStatus: string | null;
+        if (courseAssignments.length > 0) {
+          const subsForCourse = subsByCourse.get(cid) ?? [];
+          const statuses = courseAssignments.map(a => {
+            const recipe = recipeMap.get(a.recipeId);
+            const cuisineId = recipe?.cuisineId ?? a.cuisineId;
+            const label = `${cuisineMap.get(cuisineId ?? '')?.name ?? ''} — ${recipe?.foodName ?? ''}`.trim();
+            return resolveAssignmentStatus(label, subsForCourse);
+          });
+          submissionStatus = statuses.every(s => s === 'approved')
+            ? 'approved'
+            : statuses.some(s => s === 'redo')
+              ? 'redo'
+              : statuses.some(s => s !== 'not_uploaded')
+                ? 'pending'
+                : null;
+        } else {
+          submissionStatus = latestSub.get(cid) ?? null;
+        }
+
         progress[cid] = {
           modules_total:     modIds.length,
           modules_done:      modIds.filter((m: string) => doneSet.has(m)).length,
-          submission_status: latestSub.get(cid) ?? null,
+          submission_status: submissionStatus,
         };
       });
     }
@@ -564,6 +617,27 @@ partnerRoutes.post('/courses/:courseId/cook-drafts/:assignmentId/upload', async 
   } catch (e) { next(e); }
 });
 
+partnerRoutes.post('/courses/:courseId/cook-drafts/:assignmentId/remove-image', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const userId   = (req as AuthRequest).user.id;
+    const courseId = req.params.courseId;
+    const { assignmentId } = req.params;
+    const { path: filePath } = req.body as { path?: string };
+    if (!filePath) { res.status(400).json({ error: 'path required' }); return; }
+
+    const assignment = await prisma.lpProductAssignment.findFirst({ where: { id: assignmentId, userId, courseId } });
+    if (!assignment) { res.status(404).json({ error: 'Assignment not found' }); return; }
+
+    const draft = await prisma.lpProductUploadDraft.findUnique({ where: { assignmentId } });
+    if (!draft) { res.status(404).json({ error: 'No draft found' }); return; }
+    if (draft.status !== 'pending') { res.status(400).json({ error: 'Cannot remove images after submitting' }); return; }
+
+    const files = ((draft.files as Array<{ path: string }>) ?? []).filter(f => f.path !== filePath);
+    const updated = await prisma.lpProductUploadDraft.update({ where: { assignmentId }, data: { files } });
+    res.json({ id: updated.id, status: updated.status, files: updated.files });
+  } catch (e) { next(e); }
+});
+
 partnerRoutes.post('/courses/:courseId/cook-drafts/:assignmentId/submit', async (req: Request, res: Response, next: NextFunction) => {
   try {
     const userId   = (req as AuthRequest).user.id;
@@ -574,14 +648,30 @@ partnerRoutes.post('/courses/:courseId/cook-drafts/:assignmentId/submit', async 
     if (!assignment) { res.status(404).json({ error: 'Assignment not found' }); return; }
 
     const draft = await prisma.lpProductUploadDraft.findUnique({ where: { assignmentId } });
-    const fileCount = ((draft?.files as unknown[]) ?? []).length;
-    if (!draft || fileCount === 0) { res.status(400).json({ error: 'Upload at least one photo before submitting' }); return; }
+    const files = ((draft?.files as Array<{ path: string }>) ?? []);
+    if (!draft || files.length === 0) { res.status(400).json({ error: 'Upload at least one photo before submitting' }); return; }
 
-    const updated = await prisma.lpProductUploadDraft.update({
-      where: { assignmentId },
-      data:  { status: 'submitted', submittedAt: new Date() },
+    // Resolve the product's label the same way /my-cook-assignments does — the
+    // recipe's own cuisineId is the source of truth over the assignment's stored one.
+    const recipe    = await prisma.lpRecipe.findUnique({ where: { id: assignment.recipeId } });
+    const cuisineId = recipe?.cuisineId ?? assignment.cuisineId;
+    const cuisine   = cuisineId ? await prisma.lpCuisine.findUnique({ where: { id: cuisineId } }) : null;
+    const label     = `${cuisine?.name ?? ''} — ${recipe?.foodName ?? ''}`.trim();
+
+    const [updated, sub] = await prisma.$transaction([
+      prisma.lpProductUploadDraft.update({
+        where: { assignmentId },
+        data:  { status: 'submitted', submittedAt: new Date() },
+      }),
+      prisma.lpProductSubmission.create({
+        data: { userId, courseId, files: files.map(f => ({ path: f.path, label })), submittedAt: new Date() },
+      }),
+    ]);
+    await prisma.lpPartnerEvent.create({
+      data: { courseId, userId, eventType: 'product_submitted', payload: { submission_id: sub.id, file_count: files.length, label } },
     });
-    res.json({ id: updated.id, status: updated.status });
+
+    res.json({ id: updated.id, status: updated.status, submission_id: sub.id });
   } catch (e) { next(e); }
 });
 

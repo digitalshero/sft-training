@@ -52,3 +52,7 @@ export const submitCookDraft = (d: { course_id: string; assignmentId: string }) 
   api
     .post(`/partner/courses/${d.course_id}/cook-drafts/${d.assignmentId}/submit`)
     .then((r) => r.data);
+export const removeCookDraftImage = (d: { course_id: string; assignmentId: string; path: string }) =>
+  api
+    .post(`/partner/courses/${d.course_id}/cook-drafts/${d.assignmentId}/remove-image`, { path: d.path })
+    .then((r) => r.data);

@@ -673,21 +673,25 @@ sftRoutes.post('/invites/:id/resend', requireCourseBuilderOrInviteCertify, async
     res.json(result);
   } catch (e) { next(e); }
 });
-sftRoutes.get('/invites/:id/events', requireReview, async (req, res, next) => {
+sftRoutes.get('/invites/:id/events', requireInviteCertifyOrReview, async (req, res, next) => {
   try {
     const invite = await prisma.lpPartnerInvite.findUniqueOrThrow({ where: { id: req.params.id } });
     const course = await prisma.lpCourse.findUniqueOrThrow({ where: { id: invite.courseId }, select: { id: true, title: true } });
 
-    let profile: { displayName: string | null } | null = null;
+    let profile: { displayName: string | null; phone: string | null } | null = null;
+    let user: { createdAt: Date; lastSignInAt: Date | null } | null = null;
     if (invite.userId) {
-      profile = await prisma.profile.findUnique({ where: { id: invite.userId }, select: { displayName: true } });
+      [profile, user] = await Promise.all([
+        prisma.profile.findUnique({ where: { id: invite.userId }, select: { displayName: true, phone: true } }),
+        prisma.user.findUnique({ where: { id: invite.userId }, select: { createdAt: true, lastSignInAt: true } }),
+      ]);
     }
 
     const modules = invite.userId
       ? await prisma.lpModule.findMany({
           where: { courseId: invite.courseId, published: true },
           orderBy: { sortOrder: 'asc' },
-          select: { id: true, title: true, sortOrder: true },
+          select: { id: true, title: true, sortOrder: true, dayId: true },
         })
       : [];
 
@@ -706,6 +710,41 @@ sftRoutes.get('/invites/:id/events', requireReview, async (req, res, next) => {
       completed_at: progressByModule.get(m.id)?.completedAt ?? null,
       progress_pct: progressByModule.get(m.id)?.progressPct ?? 0,
     }));
+
+    // Day-level milestones ("Day 1 Completed" etc.) — a day counts as done once
+    // every one of its modules has a completedAt.
+    const days = invite.userId && modules.length
+      ? await prisma.lpCourseDay.findMany({ where: { courseId: invite.courseId }, orderBy: { dayNo: 'asc' } })
+      : [];
+    const modulesByDay = new Map<string, typeof modules>();
+    modules.forEach(m => { if (m.dayId) { const arr = modulesByDay.get(m.dayId) ?? []; arr.push(m); modulesByDay.set(m.dayId, arr); } });
+    const dayMilestones = days
+      .map(d => {
+        const dayModules = modulesByDay.get(d.id) ?? [];
+        if (!dayModules.length) return null;
+        const completions = dayModules.map(m => progressByModule.get(m.id)?.completedAt ?? null);
+        if (completions.some(c => !c)) return null;
+        const at = completions.reduce((latest: Date, c) => (c! > latest ? c! : latest), completions[0]!);
+        return { title: `Day ${d.dayNo} Completed`, at, detail: null };
+      })
+      .filter((m): m is { title: string; at: Date; detail: null } => m !== null);
+
+    const quizAttempts = invite.userId && modules.length
+      ? await prisma.lpModuleQuizAttempt.findMany({
+          where: { userId: invite.userId, moduleId: { in: modules.map(m => m.id) }, passed: true },
+          orderBy: { createdAt: 'asc' },
+        })
+      : [];
+    const quizMilestones = (() => {
+      const seenPlacement = new Set<string>();
+      return quizAttempts
+        .filter(a => { if (seenPlacement.has(a.placement)) return false; seenPlacement.add(a.placement); return true; })
+        .map(a => ({
+          title: a.placement === 'end' ? 'Final Quiz' : 'Mid Quiz Completed',
+          at: a.createdAt,
+          detail: `${Math.round(a.scorePct)}%`,
+        }));
+    })();
 
     const submissionsRaw = invite.userId
       ? await prisma.lpProductSubmission.findMany({
@@ -738,6 +777,23 @@ sftRoutes.get('/invites/:id/events', requireReview, async (req, res, next) => {
       }),
     );
 
+    // Selected cuisine(s) + when Prepare & Cook started (first product assigned).
+    const assignments = invite.userId
+      ? await prisma.lpProductAssignment.findMany({ where: { userId: invite.userId, courseId: invite.courseId } })
+      : [];
+    const cuisineIds = [...new Set(assignments.map(a => a.cuisineId))];
+    const cuisines = cuisineIds.length ? await prisma.lpCuisine.findMany({ where: { id: { in: cuisineIds } } }) : [];
+    const cookStartedAt = assignments.length
+      ? assignments.reduce((earliest, a) => (a.createdAt < earliest ? a.createdAt : earliest), assignments[0].createdAt)
+      : null;
+
+    const visit = invite.userId
+      ? await prisma.lpPhysicalVisit.findFirst({
+          where: { userId: invite.userId, courseId: invite.courseId },
+          orderBy: { createdAt: 'desc' },
+        })
+      : null;
+
     const certificate = invite.userId
       ? await prisma.lpCertificate.findUnique({
           where: { userId_courseId: { userId: invite.userId, courseId: invite.courseId } },
@@ -749,14 +805,31 @@ sftRoutes.get('/invites/:id/events', requireReview, async (req, res, next) => {
       where: { inviteId: invite.id },
       orderBy: { createdAt: 'asc' },
     });
+
     const timeline = [
       { title: 'Invited', at: invite.sentAt, detail: null },
       ...(invite.acceptedAt ? [{ title: 'Accepted invite', at: invite.acceptedAt, detail: null }] : []),
+      ...(user ? [{ title: 'Registered', at: user.createdAt, detail: null }] : []),
+      ...(user?.lastSignInAt ? [{ title: 'Last login', at: user.lastSignInAt, detail: null }] : []),
+      ...(cookStartedAt ? [{ title: 'Prepare & Cook Started', at: cookStartedAt, detail: null }] : []),
+      ...dayMilestones,
+      ...quizMilestones,
       ...events.map(e => ({ title: e.eventType.replace(/_/g, ' '), at: e.createdAt, detail: null })),
-    ];
+      ...(visit?.assignedAt
+        ? [{ title: 'Physical Visit Scheduled', at: visit.assignedAt, detail: visit.visitDate ? `Scheduled for ${visit.visitDate}${visit.visitTime ? ` ${visit.visitTime}` : ''}` : null }]
+        : []),
+      ...(visit?.submittedAt ? [{ title: 'Physical Visit Completed', at: visit.submittedAt, detail: null }] : []),
+    ].sort((a, b) => new Date(a.at ?? 0).getTime() - new Date(b.at ?? 0).getTime());
 
     res.json({
-      partner: { display_name: profile?.displayName ?? null, email: invite.recipientEmail, user_id: invite.userId },
+      partner: {
+        display_name: profile?.displayName ?? null,
+        email: invite.recipientEmail,
+        user_id: invite.userId,
+        mobile: profile?.phone ?? null,
+        city: invite.kitchenLocation ?? null,
+        cuisines: cuisines.map(c => c.name),
+      },
       invite: { recipient_name: invite.recipientName },
       course: { id: course.id, title: course.title },
       modules: modulesOut,
@@ -815,14 +888,27 @@ sftRoutes.get('/review', requireInviteCertifyOrReview, async (req, res, next) =>
     const doneByKey = new Map<string, Set<string>>();
     progress.forEach(p => { const set = doneByKey.get(p.userId) ?? new Set<string>(); set.add(p.moduleId); doneByKey.set(p.userId, set); });
 
-    const subByKey  = new Map<string, typeof submissions[0]>();
-    submissions.forEach(s => { const k = `${s.userId}::${s.courseId}`; if (!subByKey.has(k)) subByKey.set(k, s); });
+    // Group ALL submissions per partner+course (not just the newest) — a
+    // partner can now have several small per-product submissions in flight at
+    // once, so "the status" must reflect whether ANY of them still needs
+    // review, not just whichever happens to be most recently created.
+    const subsByKey = new Map<string, typeof submissions>();
+    submissions.forEach(s => {
+      const k = `${s.userId}::${s.courseId}`;
+      const arr = subsByKey.get(k) ?? [];
+      arr.push(s);
+      subsByKey.set(k, arr);
+    });
     const certByKey = new Map<string, typeof certs[0]>();
     certs.forEach(c => certByKey.set(`${c.userId}::${c.courseId}`, c));
 
     const rows = invites.map(i => {
       const key  = i.userId ? `${i.userId}::${i.courseId}` : '';
-      const sub  = key ? subByKey.get(key)  : undefined;
+      const subs = key ? (subsByKey.get(key) ?? []) : [];
+      const newestSub = subs[0]; // already ordered submittedAt desc
+      const aggregatedStatus = subs.some(s => s.status === 'pending')
+        ? 'pending'
+        : (newestSub?.status ?? null);
       const cert = key ? certByKey.get(key) : undefined;
       const total = modsByCourse.get(i.courseId)?.length ?? 0;
       const done  = i.userId ? (doneByKey.get(i.userId)?.size ?? 0) : 0;
@@ -833,8 +919,8 @@ sftRoutes.get('/review', requireInviteCertifyOrReview, async (req, res, next) =>
         recipient_name: i.recipientName, recipient_email: i.recipientEmail,
         status: i.status, sent_at: i.sentAt, accepted_at: i.acceptedAt,
         modules_total: total, modules_done: done,
-        submission_status: sub?.status ?? null, submission_id: sub?.id ?? null,
-        submitted_at: sub?.submittedAt ?? null,
+        submission_status: aggregatedStatus, submission_id: newestSub?.id ?? null,
+        submitted_at: newestSub?.submittedAt ?? null,
         certificate_code: cert?.code ?? null, certificate_issued_at: cert?.issuedAt ?? null,
         extra_certificates_total: extraTemplateCountByCourse.get(i.courseId) ?? 0,
         extra_certificates: extra.map(c => ({ id: c.id, template_id: c.templateId, code: c.code, issued_at: c.issuedAt })),

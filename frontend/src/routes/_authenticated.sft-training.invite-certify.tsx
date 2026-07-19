@@ -54,6 +54,7 @@ import {
 } from "lucide-react";
 import { downloadCertificatePdf } from "@/lib/partner/certificate-pdf";
 import { downloadComposedCertificate } from "@/lib/partner/certificate-design";
+import { PartnerTimelineDialog } from "@/components/sft/PartnerTimelineDialog";
 
 export const Route = createFileRoute(
   "/_authenticated/sft-training/invite-certify",
@@ -156,6 +157,8 @@ function InviteTab({ courseId }: { courseId: string }) {
     onError: (e: Error) => toast.error(e.message),
   });
 
+  const [viewingInviteId, setViewingInviteId] = useState<string | null>(null);
+
   const inviteLink = (token: string) =>
     `${typeof window !== "undefined" ? window.location.origin : ""}/learn?invite=${token}`;
 
@@ -223,6 +226,13 @@ function InviteTab({ courseId }: { courseId: string }) {
               >
                 <Copy className="h-3 w-3" /> Copy link
               </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setViewingInviteId(inv.id)}
+              >
+                <Eye className="h-3 w-3" /> View Details
+              </Button>
               {!inv.revoked_at && (
                 <Button
                   variant="ghost"
@@ -236,6 +246,13 @@ function InviteTab({ courseId }: { courseId: string }) {
           ))}
         </CardContent>
       </Card>
+
+      {viewingInviteId && (
+        <PartnerTimelineDialog
+          inviteId={viewingInviteId}
+          onOpenChange={(open) => !open && setViewingInviteId(null)}
+        />
+      )}
     </div>
   );
 }

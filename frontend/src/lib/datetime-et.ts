@@ -24,3 +24,21 @@ export function formatDateTimeET(value: string | Date): string {
   });
   return `${formatted} ET`;
 }
+
+// Like formatDateTimeET, but with the precise "EDT"/"EST" abbreviation for
+// the given date instead of the generic "ET" suffix — the zone name is
+// computed by Intl per-date, never hardcoded, so it's correct across the
+// daylight-saving transition. Kept separate from formatDateTimeET (used
+// across many partner/admin pages) so this precision only applies where
+// it was specifically requested.
+export function formatDateTimeETPrecise(value: string | Date): string {
+  return new Date(value).toLocaleString("en-US", {
+    timeZone: ET_ZONE,
+    year: "numeric",
+    month: "short",
+    day: "2-digit",
+    hour: "numeric",
+    minute: "2-digit",
+    timeZoneName: "short",
+  });
+}
