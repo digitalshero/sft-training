@@ -50,6 +50,7 @@ export function ReviewQueue({ courseId }: { courseId?: string }) {
     const all = (query.data ?? []) as ReviewRow[];
     return all.filter((r) => {
       if (statusFilter !== "all") {
+        if (statusFilter === "yet_to_start" && !r.yet_to_start) return false;
         if (
           statusFilter === "needs_review" &&
           r.submission_status !== "pending"
@@ -111,6 +112,7 @@ export function ReviewQueue({ courseId }: { courseId?: string }) {
               </SelectTrigger>
               <SelectContent>
                 <SelectItem value="all">All partners</SelectItem>
+                <SelectItem value="yet_to_start">Yet to Start</SelectItem>
                 <SelectItem value="needs_review">
                   Needs product review
                 </SelectItem>

@@ -205,6 +205,7 @@ export interface ReviewPartnerRow {
   submitted_at: string | null;
   certificate_code: string | null;
   certificate_issued_at: string | null;
+  yet_to_start: boolean;
 }
 export interface ProductSubmission {
   id: string;
@@ -391,6 +392,8 @@ export const createInvite = (d: Partial<PartnerInvite>) =>
   api.post("/sft/invites", d).then((r) => r.data);
 export const revokeInvite = (d: { id: string }) =>
   api.post(`/sft/invites/${d.id}/revoke`).then((r) => r.data);
+export const restoreInvite = (d: { id: string }) =>
+  api.post(`/sft/invites/${d.id}/restore`).then((r) => r.data);
 export const sendPartnerLoginLink = (d: { invite_id: string }) =>
   api.post(`/sft/invites/${d.invite_id}/resend`).then((r) => r.data);
 export const listReviewPartners = (d?: {

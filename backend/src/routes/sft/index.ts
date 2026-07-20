@@ -667,6 +667,27 @@ sftRoutes.post('/invites/:id/revoke', requireCourseBuilderOrInviteCertify, async
   } catch (e) { next(e); }
 });
 
+// Reactivates a revoked invite in place — same token/link, same partner
+// account, same course enrolment and progress. Only the invite's own
+// revoked/status fields change; nothing else is touched or recreated.
+sftRoutes.post('/invites/:id/restore', requireCourseBuilderOrInviteCertify, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const adminId = (req as AuthRequest).user.id;
+    const invite = await prisma.lpPartnerInvite.findUnique({ where: { id: req.params.id } });
+    if (!invite) { res.status(404).json({ error: 'Invite not found' }); return; }
+    if (!invite.revokedAt) { res.status(400).json({ error: 'Invite is not revoked' }); return; }
+
+    const restored = await prisma.lpPartnerInvite.update({
+      where: { id: req.params.id },
+      data:  { status: 'sent', revokedAt: null },
+    });
+    await prisma.lpPartnerEvent.create({
+      data: { courseId: restored.courseId, inviteId: restored.id, eventType: 'invite_restored', payload: { restored_by: adminId } },
+    });
+    res.json({ ok: true });
+  } catch (e) { next(e); }
+});
+
 sftRoutes.post('/invites/:id/resend', requireCourseBuilderOrInviteCertify, async (req, res, next) => {
   try {
     const result = await sendPartnerInviteEmail(req.params.id);
@@ -856,12 +877,15 @@ sftRoutes.get('/review', requireInviteCertifyOrReview, async (req, res, next) =>
     const userIds   = invites.map(i => i.userId).filter((x): x is string => !!x);
     const courseIds = [...new Set(invites.map(i => i.courseId))];
 
-    const [courses, mods, submissions, certs, extraCerts] = await Promise.all([
+    const [courses, mods, submissions, certs, extraCerts, visits] = await Promise.all([
       prisma.lpCourse.findMany({ where: { id: { in: courseIds } }, select: { id: true, title: true, certificateTemplates: true } }),
       prisma.lpModule.findMany({ where: { courseId: { in: courseIds }, published: true }, select: { id: true, courseId: true } }),
       userIds.length ? prisma.lpProductSubmission.findMany({ where: { userId: { in: userIds }, courseId: { in: courseIds } }, orderBy: { submittedAt: 'desc' } }) : [],
       userIds.length ? prisma.lpCertificate.findMany({ where: { userId: { in: userIds }, courseId: { in: courseIds } } }) : [],
       userIds.length ? prisma.lpPartnerCertificate.findMany({ where: { userId: { in: userIds }, courseId: { in: courseIds }, revokedAt: null } }) : [],
+      // Existence-only check for the "Yet to Start" filter below — a partner
+      // who has begun a Physical Visit workflow at all must not qualify.
+      userIds.length ? prisma.lpPhysicalVisit.findMany({ where: { userId: { in: userIds }, courseId: { in: courseIds } }, select: { userId: true, courseId: true } }) : [],
     ]);
 
     const courseMap    = new Map(courses.map(c => [c.id, c.title]));
@@ -879,14 +903,28 @@ sftRoutes.get('/review', requireInviteCertifyOrReview, async (req, res, next) =>
     mods.forEach(m => { const arr = modsByCourse.get(m.courseId) ?? []; arr.push(m.id); modsByCourse.set(m.courseId, arr); });
 
     let progress: { userId: string; moduleId: string }[] = [];
+    // Any-activity progress (no completedAt filter) — a module that was
+    // opened/attempted but not finished still has a row here (e.g. a failed
+    // quiz attempt), so this is what "has started a module" really means for
+    // the "Yet to Start" filter below, distinct from `doneByKey`'s completions.
+    let anyProgress: { userId: string }[] = [];
     if (userIds.length && mods.length) {
-      progress = await prisma.lpModuleProgress.findMany({
-        where: { userId: { in: userIds }, moduleId: { in: mods.map(m => m.id) }, completedAt: { not: null } },
-        select: { userId: true, moduleId: true },
-      });
+      const moduleIds = mods.map(m => m.id);
+      [progress, anyProgress] = await Promise.all([
+        prisma.lpModuleProgress.findMany({
+          where: { userId: { in: userIds }, moduleId: { in: moduleIds }, completedAt: { not: null } },
+          select: { userId: true, moduleId: true },
+        }),
+        prisma.lpModuleProgress.findMany({
+          where: { userId: { in: userIds }, moduleId: { in: moduleIds } },
+          select: { userId: true },
+        }),
+      ]);
     }
     const doneByKey = new Map<string, Set<string>>();
     progress.forEach(p => { const set = doneByKey.get(p.userId) ?? new Set<string>(); set.add(p.moduleId); doneByKey.set(p.userId, set); });
+    const anyActivityByUser = new Set(anyProgress.map(p => p.userId));
+    const visitKeySet = new Set(visits.map(v => `${v.userId}::${v.courseId}`));
 
     // Group ALL submissions per partner+course (not just the newest) — a
     // partner can now have several small per-product submissions in flight at
@@ -913,6 +951,11 @@ sftRoutes.get('/review', requireInviteCertifyOrReview, async (req, res, next) =>
       const total = modsByCourse.get(i.courseId)?.length ?? 0;
       const done  = i.userId ? (doneByKey.get(i.userId)?.size ?? 0) : 0;
       const extra = key ? (extraCertsByKey.get(key) ?? []) : [];
+      const yetToStart =
+        !(i.userId && anyActivityByUser.has(i.userId)) &&
+        subs.length === 0 &&
+        !cert &&
+        !(key && visitKeySet.has(key));
       return {
         invite_id: i.id, user_id: i.userId, course_id: i.courseId,
         course_title: courseMap.get(i.courseId) ?? '—',
@@ -924,6 +967,7 @@ sftRoutes.get('/review', requireInviteCertifyOrReview, async (req, res, next) =>
         certificate_code: cert?.code ?? null, certificate_issued_at: cert?.issuedAt ?? null,
         extra_certificates_total: extraTemplateCountByCourse.get(i.courseId) ?? 0,
         extra_certificates: extra.map(c => ({ id: c.id, template_id: c.templateId, code: c.code, issued_at: c.issuedAt })),
+        yet_to_start: yetToStart,
       };
     });
     res.json(rows);

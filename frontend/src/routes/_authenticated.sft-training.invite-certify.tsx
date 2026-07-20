@@ -8,6 +8,7 @@ import {
   listInvites,
   listEligibleForCertificate,
   revokeInvite,
+  restoreInvite,
   adminIssueCertificate,
   adminRevokeCertificate,
   listExtraCertificates,
@@ -40,6 +41,8 @@ import {
 import {
   Dialog,
   DialogContent,
+  DialogDescription,
+  DialogFooter,
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
@@ -157,7 +160,20 @@ function InviteTab({ courseId }: { courseId: string }) {
     onError: (e: Error) => toast.error(e.message),
   });
 
+  const restore = useMutation({
+    mutationFn: restoreInvite,
+    onSuccess: () => {
+      toast.success(
+        "Partner access restored successfully. The existing invite link is active again.",
+      );
+      qc.invalidateQueries({ queryKey: ["lp-all-invites", courseId] });
+      setConfirmRestoreId(null);
+    },
+    onError: (e: Error) => toast.error(e.message),
+  });
+
   const [viewingInviteId, setViewingInviteId] = useState<string | null>(null);
+  const [confirmRestoreId, setConfirmRestoreId] = useState<string | null>(null);
 
   const inviteLink = (token: string) =>
     `${typeof window !== "undefined" ? window.location.origin : ""}/learn?invite=${token}`;
@@ -233,7 +249,15 @@ function InviteTab({ courseId }: { courseId: string }) {
               >
                 <Eye className="h-3 w-3" /> View Details
               </Button>
-              {!inv.revoked_at && (
+              {inv.revoked_at ? (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setConfirmRestoreId(inv.id)}
+                >
+                  Restore Access
+                </Button>
+              ) : (
                 <Button
                   variant="ghost"
                   size="sm"
@@ -252,6 +276,41 @@ function InviteTab({ courseId }: { courseId: string }) {
           inviteId={viewingInviteId}
           onOpenChange={(open) => !open && setViewingInviteId(null)}
         />
+      )}
+
+      {confirmRestoreId && (
+        <Dialog
+          open
+          onOpenChange={(open) => !open && setConfirmRestoreId(null)}
+        >
+          <DialogContent>
+            <DialogHeader>
+              <DialogTitle>Restore Partner Access?</DialogTitle>
+              <DialogDescription>
+                This will reactivate the partner&apos;s existing invitation
+                link. The partner will be able to log in again and continue
+                the course from the previously saved progress.
+              </DialogDescription>
+            </DialogHeader>
+            <DialogFooter>
+              <Button
+                variant="outline"
+                onClick={() => setConfirmRestoreId(null)}
+              >
+                Cancel
+              </Button>
+              <Button
+                disabled={restore.isPending}
+                onClick={() => restore.mutate({ id: confirmRestoreId })}
+              >
+                {restore.isPending && (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                )}
+                Restore Access
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
       )}
     </div>
   );
