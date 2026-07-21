@@ -6,7 +6,7 @@ import {
   useNavigate,
   useRouterState,
 } from "@tanstack/react-router";
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { motion, type Variants } from "framer-motion";
 import { useAnimatedPercent } from "@/hooks/use-animated-percent";
 import { useClearNotificationsOnVisit } from "@/lib/partner/notifications.functions";
@@ -14,6 +14,8 @@ import {
   getCourse,
   myCourseState,
   myProductSubmission,
+  getDayPopupStatus,
+  acknowledgeDayPopup,
   type Course,
   type CourseModule,
   type CourseDay,
@@ -108,6 +110,21 @@ function CoursePage() {
     queryFn: () => fnVideos({ course_id: courseId }),
   });
 
+  // Durable, per-day "has this completion popup already been shown" record —
+  // replaces sessionStorage (which only lasted one browser tab/session) so
+  // the popup survives refresh, re-login, and other devices without ever
+  // showing more than once per day.
+  const qc = useQueryClient();
+  const popupStatusQ = useQuery<{ acknowledged_day_ids: string[] }>({
+    queryKey: ["lp-day-popup-status", courseId],
+    queryFn: () => getDayPopupStatus({ courseId }),
+  });
+  const ackPopupM = useMutation({
+    mutationFn: (dayId: string) => acknowledgeDayPopup({ dayId }),
+    onSuccess: () =>
+      qc.invalidateQueries({ queryKey: ["lp-day-popup-status", courseId] }),
+  });
+
   // Hooks must run unconditionally on every render, so compute a safe
   // percentage (0 while data is still loading) before any early returns below.
   const earlyDayModules = (courseQ.data?.modules ?? []).filter((m) => m.day_id);
@@ -130,9 +147,10 @@ function CoursePage() {
     scorePct: number | null;
   } | null>(null);
   React.useEffect(() => {
-    if (!courseQ.data || !stateQ.data) return;
+    if (!courseQ.data || !stateQ.data || !popupStatusQ.data) return;
     const { modules: mods, days: ds } = courseQ.data;
     const prog: ModuleProgress[] = stateQ.data.progress ?? [];
+    const acknowledged = new Set(popupStatusQ.data.acknowledged_day_ids);
     const done = (id: string) =>
       prog.some((p: ModuleProgress) => p.module_id === id && p.completed_at);
     const ordered = [...ds].sort((a, b) => a.day_no - b.day_no);
@@ -142,12 +160,11 @@ function CoursePage() {
       if (dayMods.length === 0) continue;
       const allComplete = dayMods.every((m: CourseModule) => done(m.id));
       if (!allComplete) continue;
-      const key = `day-celebrated:${courseId}:${d.id}`;
-      if (typeof window === "undefined" || sessionStorage.getItem(key))
-        continue;
+      if (acknowledged.has(d.id)) continue;
       const next = ordered[i + 1] ?? null;
       const scoreKey = `day-score:${courseId}:${d.id}`;
-      const rawScore = sessionStorage.getItem(scoreKey);
+      const rawScore =
+        typeof window !== "undefined" ? sessionStorage.getItem(scoreKey) : null;
       if (rawScore != null) sessionStorage.removeItem(scoreKey);
       setCelebrateDay({
         dayNo: d.day_no,
@@ -156,10 +173,14 @@ function CoursePage() {
         nextDayTitle: next?.title ?? null,
         scorePct: rawScore != null ? Number(rawScore) : null,
       });
-      sessionStorage.setItem(key, "1");
+      ackPopupM.mutate(d.id);
       break;
     }
-  }, [courseQ.data, stateQ.data, courseId]);
+    // ackPopupM is a stable useMutation reference and intentionally excluded
+    // from deps — this effect must re-run when new progress/status data
+    // arrives, not on every mutation object identity change.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [courseQ.data, stateQ.data, popupStatusQ.data, courseId]);
 
   // Access to a course ends 30 days after certification — checked in
   // /learning/courses/:courseId/my-state and applies before the module

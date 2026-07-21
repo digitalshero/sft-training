@@ -311,6 +311,16 @@ export const myCourseState = (d: { courseId: string }) =>
   api.get(`/learning/courses/${d.courseId}/my-state`).then((r) => r.data);
 export const markModuleComplete = (d: { moduleId: string }) =>
   api.post(`/learning/modules/${d.moduleId}/complete`).then((r) => r.data);
+export const getDayPopupStatus = (d: {
+  courseId: string;
+}): Promise<{ acknowledged_day_ids: string[] }> =>
+  api
+    .get(`/learning/courses/${d.courseId}/day-popup-status`)
+    .then((r) => r.data);
+export const acknowledgeDayPopup = (d: { dayId: string }) =>
+  api
+    .post(`/learning/days/${d.dayId}/acknowledge-popup`)
+    .then((r) => r.data);
 export const getModuleNote = (d: {
   moduleId: string;
 }): Promise<{ body: string; updated_at: string | null }> =>

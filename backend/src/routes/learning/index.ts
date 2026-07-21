@@ -205,6 +205,34 @@ learningRoutes.post('/modules/:moduleId/complete', async (req: Request, res: Res
   } catch (e) { next(e); }
 });
 
+// ── Day-completion popup, shown once per partner per day ─────────────────────
+
+learningRoutes.get('/courses/:courseId/day-popup-status', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const userId   = (req as AuthRequest).user.id;
+    const courseId = req.params.courseId;
+    const acks = await prisma.lpDayCompletionAck.findMany({
+      where:  { userId, courseId },
+      select: { dayId: true },
+    });
+    res.json({ acknowledged_day_ids: acks.map(a => a.dayId) });
+  } catch (e) { next(e); }
+});
+
+learningRoutes.post('/days/:dayId/acknowledge-popup', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const userId = (req as AuthRequest).user.id;
+    const dayId  = req.params.dayId;
+    const day = await prisma.lpCourseDay.findUniqueOrThrow({ where: { id: dayId }, select: { courseId: true } });
+    await prisma.lpDayCompletionAck.upsert({
+      where:  { userId_dayId: { userId, dayId } },
+      create: { userId, dayId, courseId: day.courseId },
+      update: {},
+    });
+    res.json({ ok: true });
+  } catch (e) { next(e); }
+});
+
 // ── Deck slides (parsed server-side, cached) ─────────────────────────────────
 
 learningRoutes.get('/modules/:moduleId/slides', async (req: Request, res: Response, next: NextFunction) => {

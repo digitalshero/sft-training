@@ -476,8 +476,9 @@ model LpCourseDay {
   createdAt        DateTime @default(now()) @map("created_at")
   updatedAt        DateTime @updatedAt @map("updated_at")
 
-  course  LpCourse   @relation(fields: [courseId], references: [id], onDelete: Cascade)
-  modules LpModule[]
+  course             LpCourse             @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  modules            LpModule[]
+  completionAcks     LpDayCompletionAck[]
 
   @@unique([courseId, dayNo])
   @@map("lp_course_days")
@@ -548,6 +549,22 @@ model LpModuleProgress {
 
   @@unique([userId, moduleId])
   @@map("lp_module_progress")
+}
+
+// Durable, per-partner, per-day record of whether that day's one-time
+// completion popup has already been shown — prevents it from reappearing on
+// refresh, re-login, revisiting the day, or on another device.
+model LpDayCompletionAck {
+  id       String   @id @default(uuid())
+  userId   String   @map("user_id")
+  dayId    String   @map("day_id")
+  courseId String   @map("course_id")
+  shownAt  DateTime @default(now()) @map("shown_at")
+
+  day LpCourseDay @relation(fields: [dayId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, dayId])
+  @@map("lp_day_completion_acks")
 }
 
 model LpModuleQuizAttempt {
