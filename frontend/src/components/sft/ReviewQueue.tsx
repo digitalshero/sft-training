@@ -29,8 +29,10 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { Loader2, Search, Eye, CheckCircle2, Award } from "lucide-react";
+import { Loader2, Search, Eye, CheckCircle2, Award, FileSpreadsheet } from "lucide-react";
 import { PartnerTimelineDialog, StatusBadge, fmt } from "./PartnerTimelineDialog";
+import { DeletePartnerRecordButton } from "./DeletePartnerRecordButton";
+import { exportXLSX, type ExportColumn } from "@/lib/export";
 
 type ReviewRow = ReviewPartnerRow & { visit_status?: string | null };
 
@@ -74,6 +76,30 @@ export function ReviewQueue({ courseId }: { courseId?: string }) {
       );
     });
   }, [query.data, q, statusFilter]);
+
+  const exportCols: ExportColumn<ReviewRow>[] = [
+    { key: "recipient_name", label: "Partner Name" },
+    { key: "recipient_email", label: "Email" },
+    { key: "course_title", label: "Course" },
+    { key: "modules", label: "Module Progress", get: (r) => `${r.modules_done}/${r.modules_total}` },
+    { key: "products_submitted", label: "Products Submitted" },
+    { key: "products_approved", label: "Products Approved" },
+    { key: "products_redo", label: "Products Requiring Redo" },
+    { key: "products_pending", label: "Pending Products" },
+    { key: "visit_status", label: "Physical Visit Status", get: (r) => r.visit_status ?? "Not Visited" },
+    { key: "certificate_code", label: "Certificate Status", get: (r) => r.certificate_code ?? "Not Certified" },
+    { key: "sent_at", label: "Invited Date", get: (r) => fmt(r.sent_at) },
+    {
+      key: "overall_status",
+      label: "Current Overall Status",
+      get: (r) =>
+        r.certificate_code
+          ? "Certified"
+          : r.yet_to_start
+            ? "Yet to Start"
+            : (r.submission_status ?? (r.modules_done > 0 ? "In progress" : "Not started")),
+    },
+  ];
 
   const counts = useMemo(() => {
     const all = (query.data ?? []) as ReviewRow[];
@@ -129,6 +155,13 @@ export function ReviewQueue({ courseId }: { courseId?: string }) {
               }
             >
               Refresh
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => exportXLSX("sft-review", rows, exportCols)}
+            >
+              <FileSpreadsheet className="h-3.5 w-3.5" /> Export Sheet
             </Button>
           </div>
         </div>
@@ -215,13 +248,23 @@ export function ReviewQueue({ courseId }: { courseId?: string }) {
                     </TableCell>
                     <TableCell className="text-right">
                       {r.invite_id && (
-                        <Button
-                          size="sm"
-                          variant="outline"
-                          onClick={() => setOpenInvite(r.invite_id)}
-                        >
-                          <Eye className="mr-1 h-3.5 w-3.5" /> Open
-                        </Button>
+                        <div className="flex justify-end gap-2">
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            onClick={() => setOpenInvite(r.invite_id)}
+                          >
+                            <Eye className="mr-1 h-3.5 w-3.5" /> Open
+                          </Button>
+                          <DeletePartnerRecordButton
+                            inviteId={r.invite_id}
+                            partnerName={r.recipient_name}
+                            partnerEmail={r.recipient_email}
+                            onDeleted={() =>
+                              qc.invalidateQueries({ queryKey: ["lp-review-partners"] })
+                            }
+                          />
+                        </div>
                       )}
                     </TableCell>
                   </TableRow>

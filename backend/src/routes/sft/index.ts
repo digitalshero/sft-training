@@ -613,6 +613,7 @@ function serializeVisit(v: Record<string, unknown>) {
     updated_at:             v.updatedAt,
     partner_name:           v.partnerName ?? null,
     partner_email:          v.partnerEmail ?? null,
+    invite_id:              v.inviteId ?? null,
   };
 }
 
@@ -684,6 +685,47 @@ sftRoutes.post('/invites/:id/restore', requireCourseBuilderOrInviteCertify, asyn
     await prisma.lpPartnerEvent.create({
       data: { courseId: restored.courseId, inviteId: restored.id, eventType: 'invite_restored', payload: { restored_by: adminId } },
     });
+    res.json({ ok: true });
+  } catch (e) { next(e); }
+});
+
+// Permanently removes ONE partner's data for ONE course — used to clean up a
+// duplicate/incorrect invite. Never touches the `User` login account itself
+// (a person can hold invites/enrolments for other courses too), and never
+// touches course/cuisine/recipe/quiz master data (none of it has any FK from
+// partner data). Everything below is scoped to this exact userId+courseId
+// pair and runs in a single transaction — either all of it is removed, or
+// none of it is, so no partial/orphaned state is possible.
+sftRoutes.delete('/invites/:id', requireCourseBuilderOrInviteCertify, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const invite = await prisma.lpPartnerInvite.findUnique({ where: { id: req.params.id } });
+    if (!invite) { res.status(404).json({ error: 'Invite not found' }); return; }
+    const { userId, courseId } = invite;
+
+    await prisma.$transaction(async (tx) => {
+      if (userId) {
+        const courseModules = await tx.lpModule.findMany({ where: { courseId }, select: { id: true } });
+        const moduleIds = courseModules.map(m => m.id);
+
+        await Promise.all([
+          tx.lpEnrolment.deleteMany({ where: { userId, courseId } }),
+          tx.lpProductAssignment.deleteMany({ where: { userId, courseId } }),
+          tx.lpProductUploadDraft.deleteMany({ where: { userId, courseId } }),
+          tx.lpProductSubmission.deleteMany({ where: { userId, courseId } }),
+          tx.lpCertificate.deleteMany({ where: { userId, courseId } }),
+          tx.lpPartnerCertificate.deleteMany({ where: { userId, courseId } }),
+          tx.lpDayCompletionAck.deleteMany({ where: { userId, courseId } }),
+          tx.lpPhysicalVisit.deleteMany({ where: { userId, courseId } }), // children cascade automatically
+          tx.lpPartnerEvent.deleteMany({ where: { userId, courseId } }),
+          moduleIds.length ? tx.lpModuleProgress.deleteMany({ where: { userId, moduleId: { in: moduleIds } } }) : Promise.resolve(),
+          moduleIds.length ? tx.lpModuleQuizAttempt.deleteMany({ where: { userId, moduleId: { in: moduleIds } } }) : Promise.resolve(),
+          moduleIds.length ? tx.lpModuleNote.deleteMany({ where: { userId, moduleId: { in: moduleIds } } }) : Promise.resolve(),
+        ]);
+      }
+      // SftPartnerTask cascades automatically via its existing FK to the invite.
+      await tx.lpPartnerInvite.delete({ where: { id: req.params.id } });
+    });
+
     res.json({ ok: true });
   } catch (e) { next(e); }
 });
@@ -877,15 +919,18 @@ sftRoutes.get('/review', requireInviteCertifyOrReview, async (req, res, next) =>
     const userIds   = invites.map(i => i.userId).filter((x): x is string => !!x);
     const courseIds = [...new Set(invites.map(i => i.courseId))];
 
-    const [courses, mods, submissions, certs, extraCerts, visits] = await Promise.all([
+    const [courses, mods, submissions, certs, extraCerts, visits, assignments, recipes, cuisines] = await Promise.all([
       prisma.lpCourse.findMany({ where: { id: { in: courseIds } }, select: { id: true, title: true, certificateTemplates: true } }),
       prisma.lpModule.findMany({ where: { courseId: { in: courseIds }, published: true }, select: { id: true, courseId: true } }),
       userIds.length ? prisma.lpProductSubmission.findMany({ where: { userId: { in: userIds }, courseId: { in: courseIds } }, orderBy: { submittedAt: 'desc' } }) : [],
       userIds.length ? prisma.lpCertificate.findMany({ where: { userId: { in: userIds }, courseId: { in: courseIds } } }) : [],
       userIds.length ? prisma.lpPartnerCertificate.findMany({ where: { userId: { in: userIds }, courseId: { in: courseIds }, revokedAt: null } }) : [],
-      // Existence-only check for the "Yet to Start" filter below — a partner
-      // who has begun a Physical Visit workflow at all must not qualify.
-      userIds.length ? prisma.lpPhysicalVisit.findMany({ where: { userId: { in: userIds }, courseId: { in: courseIds } }, select: { userId: true, courseId: true } }) : [],
+      // "Yet to Start" existence check + exported "Physical Visit status" column.
+      userIds.length ? prisma.lpPhysicalVisit.findMany({ where: { userId: { in: userIds }, courseId: { in: courseIds } }, select: { userId: true, courseId: true, status: true, createdAt: true } }) : [],
+      // Per-product counts (submitted/approved/redo/pending) for the export sheet.
+      userIds.length ? prisma.lpProductAssignment.findMany({ where: { userId: { in: userIds }, courseId: { in: courseIds } } }) : [],
+      courseIds.length ? prisma.lpRecipe.findMany({ where: { courseId: { in: courseIds } } }) : [],
+      courseIds.length ? prisma.lpCuisine.findMany({ where: { courseId: { in: courseIds } } }) : [],
     ]);
 
     const courseMap    = new Map(courses.map(c => [c.id, c.title]));
@@ -940,6 +985,41 @@ sftRoutes.get('/review', requireInviteCertifyOrReview, async (req, res, next) =>
     const certByKey = new Map<string, typeof certs[0]>();
     certs.forEach(c => certByKey.set(`${c.userId}::${c.courseId}`, c));
 
+    // Latest physical visit per partner+course, for the exported status column.
+    const visitByKey = new Map<string, typeof visits[0]>();
+    visits.forEach(v => {
+      const k = `${v.userId}::${v.courseId}`;
+      const existing = visitByKey.get(k);
+      if (!existing || v.createdAt > existing.createdAt) visitByKey.set(k, v);
+    });
+
+    // Per-product counts (submitted/approved/redo/pending) for the export
+    // sheet — same assignment-id-first/label-fallback matching used on the
+    // partner side, reused here rather than duplicated a third time.
+    const recipeMap = new Map(recipes.map(r => [r.id, r] as const));
+    const cuisineMap = new Map(cuisines.map(c => [c.id, c] as const));
+    const assignmentsByKey = new Map<string, typeof assignments>();
+    assignments.forEach(a => {
+      const k = `${a.userId}::${a.courseId}`;
+      const arr = assignmentsByKey.get(k) ?? [];
+      arr.push(a);
+      assignmentsByKey.set(k, arr);
+    });
+    type SubFile = { assignment_id?: string; label?: string; decision?: string };
+    const resolveProductStatus = (assignmentId: string, label: string, subsForKey: typeof submissions): string => {
+      for (const s of subsForKey) {
+        const allFiles = (s.files as SubFile[]) ?? [];
+        const files = allFiles.some(f => f.assignment_id === assignmentId)
+          ? allFiles.filter(f => f.assignment_id === assignmentId)
+          : allFiles.filter(f => !f.assignment_id && f.label === label);
+        if (!files.length) continue;
+        if (files.some(f => f.decision === 'redo')) return 'redo';
+        if (files.every(f => f.decision === 'approved')) return 'approved';
+        return 'pending';
+      }
+      return 'not_uploaded';
+    };
+
     const rows = invites.map(i => {
       const key  = i.userId ? `${i.userId}::${i.courseId}` : '';
       const subs = key ? (subsByKey.get(key) ?? []) : [];
@@ -956,6 +1036,16 @@ sftRoutes.get('/review', requireInviteCertifyOrReview, async (req, res, next) =>
         subs.length === 0 &&
         !cert &&
         !(key && visitKeySet.has(key));
+
+      const courseAssignments = key ? (assignmentsByKey.get(key) ?? []) : [];
+      const productStatuses = courseAssignments.map(a => {
+        const recipe = recipeMap.get(a.recipeId);
+        const cuisineId = recipe?.cuisineId ?? a.cuisineId;
+        const label = `${cuisineMap.get(cuisineId ?? '')?.name ?? ''} — ${recipe?.foodName ?? ''}`.trim();
+        return resolveProductStatus(a.id, label, subs);
+      });
+      const visit = key ? visitByKey.get(key) : undefined;
+
       return {
         invite_id: i.id, user_id: i.userId, course_id: i.courseId,
         course_title: courseMap.get(i.courseId) ?? '—',
@@ -968,6 +1058,14 @@ sftRoutes.get('/review', requireInviteCertifyOrReview, async (req, res, next) =>
         extra_certificates_total: extraTemplateCountByCourse.get(i.courseId) ?? 0,
         extra_certificates: extra.map(c => ({ id: c.id, template_id: c.templateId, code: c.code, issued_at: c.issuedAt })),
         yet_to_start: yetToStart,
+        products_total: productStatuses.length,
+        products_submitted: productStatuses.filter(s => s !== 'not_uploaded').length,
+        products_approved: productStatuses.filter(s => s === 'approved').length,
+        products_redo: productStatuses.filter(s => s === 'redo').length,
+        products_pending: productStatuses.filter(s => s === 'pending').length,
+        // Was previously never populated on this endpoint — the frontend
+        // type/rendering already expected this exact field name.
+        visit_status: visit?.status ?? null,
       };
     });
     res.json(rows);
@@ -1168,7 +1266,7 @@ sftRoutes.get('/physical-visits', requirePhysicalVisit, async (req, res, next) =
       const [invites, profiles] = await Promise.all([
         prisma.lpPartnerInvite.findMany({
           where: { userId: { in: eligibleUserIds }, revokedAt: null },
-          select: { userId: true, courseId: true, recipientName: true, recipientEmail: true, kitchenLocation: true },
+          select: { id: true, userId: true, courseId: true, recipientName: true, recipientEmail: true, kitchenLocation: true },
         }),
         prisma.profile.findMany({
           where: { id: { in: eligibleUserIds } },
@@ -1185,6 +1283,7 @@ sftRoutes.get('/physical-visits', requirePhysicalVisit, async (req, res, next) =
           const prof = profileByUser.get(uid);
           return {
             id: `eligible-${uid}`,
+            inviteId: inv.id,
             userId: uid,
             courseId: inv.courseId,
             status: 'eligible',
@@ -1230,7 +1329,7 @@ sftRoutes.get('/physical-visits', requirePhysicalVisit, async (req, res, next) =
     const [visitInvites, visitProfiles, allHistories] = await Promise.all([
       realUserIds.length ? prisma.lpPartnerInvite.findMany({
         where: { userId: { in: realUserIds }, revokedAt: null },
-        select: { userId: true, courseId: true, recipientName: true, recipientEmail: true },
+        select: { id: true, userId: true, courseId: true, recipientName: true, recipientEmail: true },
       }) : [],
       realUserIds.length ? prisma.profile.findMany({
         where: { id: { in: realUserIds } },
@@ -1330,6 +1429,7 @@ sftRoutes.get('/physical-visits', requirePhysicalVisit, async (req, res, next) =
         photos:           photosByVisit.get(v.id) ?? [],
         productInspections: inspectionsByVisit.get(v.id) ?? [],
         history,
+        inviteId:         inv?.id ?? null,
       } as unknown as typeof visits[0];
     });
 

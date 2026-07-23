@@ -1,7 +1,7 @@
 /* eslint-disable */
 import { useMemo, useState } from "react";
 import { createFileRoute, Link, Outlet, useRouterState } from "@tanstack/react-router";
-import { useQuery, useMutation } from "@tanstack/react-query";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import {
   listPhysicalVisits,
@@ -51,7 +51,10 @@ import {
   RefreshCw,
   CheckCircle2,
   XCircle,
+  FileSpreadsheet,
 } from "lucide-react";
+import { DeletePartnerRecordButton } from "@/components/sft/DeletePartnerRecordButton";
+import { exportXLSX, type ExportColumn } from "@/lib/export";
 
 export const Route = createFileRoute(
   "/_authenticated/sft-training/physical-visit",
@@ -120,6 +123,7 @@ function PhysicalVisitPage() {
   const [page, setPage] = useState(0);
   const pageSize = 12;
 
+  const qc = useQueryClient();
   const fnList = listPhysicalVisits;
   const q = useQuery({
     queryKey: ["physical-visits", search, status],
@@ -127,6 +131,23 @@ function PhysicalVisitPage() {
   });
 
   const rows = useMemo(() => q.data ?? [], [q.data]);
+
+  const exportCols: ExportColumn<PhysicalVisitRow>[] = [
+    { key: "partner_name", label: "Partner Name" },
+    { key: "partner_email", label: "Partner Email" },
+    { key: "partner_phone", label: "Partner Phone" },
+    { key: "partner_location", label: "Partner Location" },
+    { key: "visitor_name", label: "Visitor Name" },
+    { key: "visitor_email", label: "Visitor Email" },
+    { key: "visitor_phone", label: "Visitor Phone" },
+    { key: "visit_date", label: "Visit Date" },
+    { key: "visit_time", label: "Visit Time" },
+    { key: "assigned_products", label: "Assigned Products", get: (r) => r.assigned_products.join(", ") },
+    { key: "accepted_products", label: "Accepted Products" },
+    { key: "rejected_products", label: "Rejected Products" },
+    { key: "inspection_percentage", label: "Approval Percentage", get: (r) => r.inspection_percentage ?? "" },
+    { key: "status", label: "Final Visit Status" },
+  ];
   const paged = useMemo(
     () => rows.slice(page * pageSize, (page + 1) * pageSize),
     [rows, page],
@@ -207,6 +228,13 @@ function PhysicalVisitPage() {
                 ))}
               </SelectContent>
             </Select>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => exportXLSX("physical-visits", rows, exportCols)}
+            >
+              <FileSpreadsheet className="h-3.5 w-3.5" /> Export Sheet
+            </Button>
           </div>
 
           <div className="overflow-x-auto rounded-md border">
@@ -377,54 +405,66 @@ function PhysicalVisitPage() {
                         )}
                       </TableCell>
                       <TableCell className="text-right">
-                        {isEligible ? (
-                          <Button asChild size="sm">
-                            <Link
-                              to="/sft-training/physical-visit/assign/$visitId"
-                              params={{ visitId: r.id }}
-                            >
-                              Assign Visitor
-                            </Link>
-                          </Button>
-                        ) : canReschedule ? (
-                          <Button asChild size="sm" variant="default">
-                            <Link
-                              to="/sft-training/physical-visit/assign/$visitId"
-                              params={{ visitId: r.id }}
-                            >
-                              <RefreshCw className="h-3.5 w-3.5" /> Reschedule
-                            </Link>
-                          </Button>
-                        ) : (
-                          <DropdownMenu>
-                            <DropdownMenuTrigger asChild>
-                              <Button variant="ghost" size="icon">
-                                <MoreHorizontal className="h-4 w-4" />
-                              </Button>
-                            </DropdownMenuTrigger>
-                            <DropdownMenuContent align="end">
-                              {r.portal_url && (
+                        <div className="flex justify-end gap-2">
+                          {isEligible ? (
+                            <Button asChild size="sm">
+                              <Link
+                                to="/sft-training/physical-visit/assign/$visitId"
+                                params={{ visitId: r.id }}
+                              >
+                                Assign Visitor
+                              </Link>
+                            </Button>
+                          ) : canReschedule ? (
+                            <Button asChild size="sm" variant="default">
+                              <Link
+                                to="/sft-training/physical-visit/assign/$visitId"
+                                params={{ visitId: r.id }}
+                              >
+                                <RefreshCw className="h-3.5 w-3.5" /> Reschedule
+                              </Link>
+                            </Button>
+                          ) : (
+                            <DropdownMenu>
+                              <DropdownMenuTrigger asChild>
+                                <Button variant="ghost" size="icon">
+                                  <MoreHorizontal className="h-4 w-4" />
+                                </Button>
+                              </DropdownMenuTrigger>
+                              <DropdownMenuContent align="end">
+                                {r.portal_url && (
+                                  <DropdownMenuItem
+                                    onClick={() => r.portal_url && copyPortal(r.portal_url)}
+                                  >
+                                    <Copy className="mr-2 h-3.5 w-3.5" /> Copy
+                                    Portal Link
+                                  </DropdownMenuItem>
+                                )}
                                 <DropdownMenuItem
-                                  onClick={() => r.portal_url && copyPortal(r.portal_url)}
+                                  onClick={() => resendMut.mutate(r.id)}
                                 >
-                                  <Copy className="mr-2 h-3.5 w-3.5" /> Copy
-                                  Portal Link
+                                  Resend Email
                                 </DropdownMenuItem>
-                              )}
-                              <DropdownMenuItem
-                                onClick={() => resendMut.mutate(r.id)}
-                              >
-                                Resend Email
-                              </DropdownMenuItem>
-                              <DropdownMenuItem
-                                onClick={() => setHistoryVisit(r)}
-                              >
-                                <History className="mr-2 h-3.5 w-3.5" /> View
-                                History
-                              </DropdownMenuItem>
-                            </DropdownMenuContent>
-                          </DropdownMenu>
-                        )}
+                                <DropdownMenuItem
+                                  onClick={() => setHistoryVisit(r)}
+                                >
+                                  <History className="mr-2 h-3.5 w-3.5" /> View
+                                  History
+                                </DropdownMenuItem>
+                              </DropdownMenuContent>
+                            </DropdownMenu>
+                          )}
+                          {r.invite_id && (
+                            <DeletePartnerRecordButton
+                              inviteId={r.invite_id}
+                              partnerName={r.partner_name ?? "Partner"}
+                              partnerEmail={r.partner_email ?? ""}
+                              onDeleted={() =>
+                                qc.invalidateQueries({ queryKey: ["physical-visits"] })
+                              }
+                            />
+                          )}
+                        </div>
                       </TableCell>
                     </TableRow>
                   );

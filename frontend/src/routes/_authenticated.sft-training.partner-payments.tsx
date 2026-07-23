@@ -9,6 +9,9 @@ import {
   type PartnerPaymentRow,
 } from "@/lib/partner-payments/partner-payments.functions";
 import { EmailDeliveryLogPanel } from "@/components/sft/EmailDeliveryLogPanel";
+import { DeletePartnerRecordButton } from "@/components/sft/DeletePartnerRecordButton";
+import { exportXLSX, type ExportColumn } from "@/lib/export";
+import { formatDateTimeET } from "@/lib/datetime-et";
 import {
   Card,
   CardContent,
@@ -47,7 +50,7 @@ import {
   TableHead,
   TableCell,
 } from "@/components/ui/table";
-import { Loader2, Copy, Plus, Trash2 } from "lucide-react";
+import { Loader2, Copy, Plus, Trash2, FileSpreadsheet } from "lucide-react";
 
 export const Route = createFileRoute("/_authenticated/sft-training/partner-payments")({
   component: PartnerPaymentsPage,
@@ -142,6 +145,18 @@ function PartnerPaymentsPage() {
 
   const payments = paymentsQ.data ?? [];
 
+  const exportCols: ExportColumn<PartnerPaymentRow>[] = [
+    { key: "partner_name", label: "Partner Name" },
+    { key: "partner_email", label: "Email" },
+    { key: "partner_phone", label: "Phone Number", get: (r) => r.partner_phone ?? "" },
+    { key: "payment_id", label: "Payment ID" },
+    { key: "amount", label: "Amount", get: (r) => formatUsd(r.amount) },
+    { key: "currency", label: "Currency", get: () => "USD" },
+    { key: "payment_status", label: "Payment Status" },
+    { key: "created_at", label: "Payment Date", get: (r) => formatDateTimeET(r.created_at) },
+    { key: "invite_status", label: "Invitation Status" },
+  ];
+
   return (
     <div className="space-y-6">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
@@ -155,9 +170,18 @@ function PartnerPaymentsPage() {
             emailed their sign-in link with no manual steps.
           </p>
         </div>
-        <Button size="sm" variant="outline" onClick={() => setAddOpen(true)}>
-          <Plus className="h-4 w-4" /> Add test payment
-        </Button>
+        <div className="flex gap-2">
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => exportXLSX("partner-payments", payments, exportCols)}
+          >
+            <FileSpreadsheet className="h-4 w-4" /> Export Sheet
+          </Button>
+          <Button size="sm" variant="outline" onClick={() => setAddOpen(true)}>
+            <Plus className="h-4 w-4" /> Add test payment
+          </Button>
+        </div>
       </div>
 
       <Card>
@@ -217,6 +241,7 @@ function PartnerPaymentsPage() {
                           payment={p}
                           isPending={deleteMut.isPending}
                           onDelete={() => deleteMut.mutate({ id: p.id })}
+                          onDeleted={invalidate}
                         />
                       </TableCell>
                     </TableRow>
@@ -392,10 +417,12 @@ function PaymentActions({
   payment,
   isPending,
   onDelete,
+  onDeleted,
 }: {
   payment: PartnerPaymentRow;
   isPending: boolean;
   onDelete: () => void;
+  onDeleted: () => void;
 }) {
   return (
     <div className="flex flex-wrap items-center gap-2">
@@ -412,6 +439,14 @@ function PaymentActions({
         </button>
       )}
       <DeletePaymentButton payment={payment} isPending={isPending} onDelete={onDelete} />
+      {payment.lp_invite_id && (
+        <DeletePartnerRecordButton
+          inviteId={payment.lp_invite_id}
+          partnerName={payment.partner_name}
+          partnerEmail={payment.partner_email}
+          onDeleted={onDeleted}
+        />
+      )}
     </div>
   );
 }

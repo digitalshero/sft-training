@@ -7,6 +7,7 @@ import {
   adminIssueCertificate,
   adminRevokeCertificate,
 } from "@/lib/learning/learning.functions";
+import { DeletePartnerRecordButton } from "./DeletePartnerRecordButton";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Textarea } from "@/components/ui/textarea";
@@ -360,7 +361,20 @@ export function PartnerTimelineDialog({
           </div>
         )}
 
-        <DialogFooter>
+        <DialogFooter className="sm:justify-between">
+          {data && (
+            <DeletePartnerRecordButton
+              inviteId={inviteId}
+              partnerName={data.partner.display_name || data.invite?.recipient_name || "Partner"}
+              partnerEmail={data.partner.email}
+              variant="outline"
+              onDeleted={() => {
+                qc.invalidateQueries({ queryKey: ["lp-all-invites"] });
+                qc.invalidateQueries({ queryKey: ["lp-review-partners"] });
+                onOpenChange(false);
+              }}
+            />
+          )}
           <Button variant="outline" onClick={() => onOpenChange(false)}>
             Close
           </Button>

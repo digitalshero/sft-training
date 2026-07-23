@@ -17,9 +17,11 @@ import {
   getCourse,
   ReviewPartnerRow,
   type ExtraCertificateTemplate,
+  type PartnerInvite,
 } from "@/lib/learning/learning.functions";
 import { CertificatePreview } from "@/components/sft/CertificatePreview";
 import { formatDateET } from "@/lib/datetime-et";
+import { exportXLSX, type ExportColumn } from "@/lib/export";
 import {
   Card,
   CardContent,
@@ -54,10 +56,12 @@ import {
   Eye,
   UserPlus,
   Download,
+  FileSpreadsheet,
 } from "lucide-react";
 import { downloadCertificatePdf } from "@/lib/partner/certificate-pdf";
 import { downloadComposedCertificate } from "@/lib/partner/certificate-design";
 import { PartnerTimelineDialog } from "@/components/sft/PartnerTimelineDialog";
+import { DeletePartnerRecordButton } from "@/components/sft/DeletePartnerRecordButton";
 
 export const Route = createFileRoute(
   "/_authenticated/sft-training/invite-certify",
@@ -175,6 +179,24 @@ function InviteTab({ courseId }: { courseId: string }) {
   const [viewingInviteId, setViewingInviteId] = useState<string | null>(null);
   const [confirmRestoreId, setConfirmRestoreId] = useState<string | null>(null);
 
+  const invitationStatus = (inv: PartnerInvite) =>
+    inv.revoked_at
+      ? "Revoked"
+      : inv.accepted_at
+        ? "In progress"
+        : inv.opened_at
+          ? "Opened"
+          : "Sent";
+
+  const exportCols: ExportColumn<PartnerInvite>[] = [
+    { key: "recipient_name", label: "Partner Name" },
+    { key: "recipient_email", label: "Email" },
+    { key: "kitchen_location", label: "Location", get: (r) => r.kitchen_location ?? "" },
+    { key: "invitation_status", label: "Invitation Status", get: invitationStatus },
+    { key: "sent_at", label: "Invitation Date", get: (r) => formatDateET(r.sent_at) },
+    { key: "accepted_at", label: "Completion Date", get: (r) => (r.accepted_at ? formatDateET(r.accepted_at) : "") },
+  ];
+
   const inviteLink = (token: string) =>
     `${typeof window !== "undefined" ? window.location.origin : ""}/learn?invite=${token}`;
 
@@ -182,12 +204,23 @@ function InviteTab({ courseId }: { courseId: string }) {
     <div className="space-y-4">
       <Card>
         <CardHeader>
-          <CardTitle className="text-base">
-            Invites ({q.data?.length ?? 0})
-          </CardTitle>
-          <CardDescription>
-            Log of every invitee for this course.
-          </CardDescription>
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <CardTitle className="text-base">
+                Invites ({q.data?.length ?? 0})
+              </CardTitle>
+              <CardDescription>
+                Log of every invitee for this course.
+              </CardDescription>
+            </div>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => exportXLSX("invite-certify", q.data ?? [], exportCols)}
+            >
+              <FileSpreadsheet className="h-3.5 w-3.5" /> Export Sheet
+            </Button>
+          </div>
         </CardHeader>
         <CardContent className="space-y-2">
           {q.isLoading && <Loader2 className="h-4 w-4 animate-spin" />}
@@ -266,6 +299,14 @@ function InviteTab({ courseId }: { courseId: string }) {
                   Revoke
                 </Button>
               )}
+              <DeletePartnerRecordButton
+                inviteId={inv.id}
+                partnerName={inv.recipient_name}
+                partnerEmail={inv.recipient_email}
+                onDeleted={() =>
+                  qc.invalidateQueries({ queryKey: ["lp-all-invites", courseId] })
+                }
+              />
             </div>
           ))}
         </CardContent>

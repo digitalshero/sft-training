@@ -532,6 +532,7 @@ function ProductChecklist({
           (a.draft_uploads.length ? a.draft_uploads : a.uploads).map((u) => ({
             path: u.path,
             label: `${a.cuisine_name} — ${a.food_name}`,
+            assignment_id: a.assignment_id,
           })),
         );
       return submitCookUploads({ course_id: courseId, files });

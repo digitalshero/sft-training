@@ -5,6 +5,7 @@ export interface PartnerPaymentRow {
   external_partner_id: string | null;
   partner_name: string;
   partner_email: string;
+  partner_phone: string | null;
   payment_id: string;
   amount: number;
   payment_status: "paid" | "unpaid";
@@ -12,6 +13,7 @@ export interface PartnerPaymentRow {
   invite_status: "pending" | "sent";
   created_at: string;
   invite_link: string | null;
+  lp_invite_id: string | null;
 }
 
 export const listPartnerPayments = (): Promise<PartnerPaymentRow[]> =>

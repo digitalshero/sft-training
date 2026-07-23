@@ -19,12 +19,17 @@ export const partnerPaymentsRoutes = Router();
 
 const requirePartnerPayments = requirePermission('sft_partner_payments');
 
-function serialize(p: PartnerPayment & { invite: PartnerInvite | null }) {
+function serialize(
+  p: PartnerPayment & { invite: PartnerInvite | null },
+  lpInviteId: string | null,
+  phone: string | null,
+) {
   return {
     id: p.id,
     external_partner_id: p.externalPartnerId,
     partner_name: p.partnerName,
     partner_email: p.partnerEmail,
+    partner_phone: phone,
     payment_id: p.paymentId,
     amount: p.amount,
     payment_status: p.paymentStatus,
@@ -32,6 +37,10 @@ function serialize(p: PartnerPayment & { invite: PartnerInvite | null }) {
     invite_status: p.inviteStatus,
     created_at: p.createdAt,
     invite_link: p.invite?.inviteLink ?? null,
+    // The SFT course-side invite (lp_partner_invites) this partner was synced
+    // to, if any — lets the admin page offer the shared SFT-record delete
+    // action alongside this module's own payment-record delete.
+    lp_invite_id: lpInviteId,
   };
 }
 
@@ -43,7 +52,27 @@ partnerPaymentsRoutes.get('/', requireAuth, requirePartnerPayments, async (_req,
       include: { invite: true },
       orderBy: { createdAt: 'desc' },
     });
-    res.json(payments.map(serialize));
+
+    const emails = [...new Set(payments.map(p => p.partnerEmail.toLowerCase()))];
+    const lpInvites = emails.length
+      ? await prisma.lpPartnerInvite.findMany({
+          where: { recipientEmail: { in: emails, mode: 'insensitive' }, revokedAt: null },
+          select: { id: true, recipientEmail: true, userId: true },
+        })
+      : [];
+    const lpInviteByEmail = new Map(lpInvites.map(i => [i.recipientEmail.toLowerCase(), i]));
+
+    const userIds = lpInvites.map(i => i.userId).filter((x): x is string => !!x);
+    const profiles = userIds.length
+      ? await prisma.profile.findMany({ where: { id: { in: userIds } }, select: { id: true, phone: true } })
+      : [];
+    const phoneByUser = new Map(profiles.map(p => [p.id, p.phone]));
+
+    res.json(payments.map(p => {
+      const lpInvite = lpInviteByEmail.get(p.partnerEmail.toLowerCase());
+      const phone = lpInvite?.userId ? (phoneByUser.get(lpInvite.userId) ?? null) : null;
+      return serialize(p, lpInvite?.id ?? null, phone);
+    }));
   } catch (e) {
     next(e);
   }
@@ -83,7 +112,7 @@ partnerPaymentsRoutes.post('/', requireAuth, requirePartnerPayments, async (req:
       where: { id: payment.id },
       include: { invite: true },
     });
-    res.status(201).json(serialize(withInvite));
+    res.status(201).json(serialize(withInvite, null, null));
   } catch (e: unknown) {
     if ((e as { code?: string }).code === 'P2002') {
       res.status(409).json({ error: 'That payment ID already exists' });
@@ -200,7 +229,7 @@ partnerPaymentsRoutes.put('/:id/accept', requireAuth, requirePartnerPayments, as
       }),
     ]);
 
-    res.json(serialize({ ...updatedPayment, invite }));
+    res.json(serialize({ ...updatedPayment, invite }, null, null));
   } catch (e) {
     next(e);
   }
@@ -223,7 +252,7 @@ partnerPaymentsRoutes.put('/:id/reject', requireAuth, requirePartnerPayments, as
       where: { id: payment.id },
       data: { approvalStatus: 'rejected' },
     });
-    res.json(serialize({ ...updated, invite: payment.invite }));
+    res.json(serialize({ ...updated, invite: payment.invite }, null, null));
   } catch (e) {
     next(e);
   }
@@ -262,7 +291,7 @@ partnerPaymentsRoutes.post('/:id/send-invite', requireAuth, requirePartnerPaymen
       prisma.partnerInvite.update({ where: { id: payment.invite.id }, data: { inviteStatus: 'sent' } }),
     ]);
 
-    res.json(serialize({ ...updatedPayment, invite: updatedInvite }));
+    res.json(serialize({ ...updatedPayment, invite: updatedInvite }, null, null));
   } catch (e) {
     next(e);
   }

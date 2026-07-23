@@ -71,6 +71,7 @@ export type PhysicalVisitRow = {
   form_status: string;
   history: PhysicalVisitHistoryRow[];
   photos: PhysicalVisitPhoto[];
+  invite_id: string | null;
 };
 export type VisitorPortalData = {
   visit_id: string;

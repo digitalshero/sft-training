@@ -1,12 +1,46 @@
 import { Router, Request, Response, NextFunction } from 'express';
 import { readFile } from 'fs/promises';
 import { join } from 'path';
+import type { Prisma } from '@prisma/client';
 import { prisma } from '../../lib/prisma';
 import { requireAuth, AuthRequest } from '../../middleware/auth';
 import { createSignedUrl } from '../../lib/storage';
 
 export const partnerRoutes = Router();
 partnerRoutes.use(requireAuth);
+
+type SubmissionFile = { assignment_id?: string; path: string; label: string };
+
+// Grows the partner's current UNREVIEWED submission for this course instead
+// of creating a sibling row every time a product is (re)submitted — this is
+// "the current active review round" that admin's Save Review acts on in one
+// atomic action. Once reviewed (reviewedAt set), the next submit starts a
+// fresh round, and the reviewed one remains as read-only history.
+async function upsertIntoActiveSubmission(
+  db: Prisma.TransactionClient | typeof prisma,
+  userId: string,
+  courseId: string,
+  newFiles: SubmissionFile[],
+) {
+  const active = await db.lpProductSubmission.findFirst({
+    where:   { userId, courseId, reviewedAt: null },
+    orderBy: { submittedAt: 'desc' },
+  });
+
+  if (!active) {
+    return db.lpProductSubmission.create({
+      data: { userId, courseId, files: newFiles, submittedAt: new Date() },
+    });
+  }
+
+  const existingFiles = (active.files as SubmissionFile[]) ?? [];
+  const incomingIds = new Set(newFiles.map(f => f.assignment_id).filter(Boolean));
+  const kept = existingFiles.filter(f => !f.assignment_id || !incomingIds.has(f.assignment_id));
+  return db.lpProductSubmission.update({
+    where: { id: active.id },
+    data:  { files: [...kept, ...newFiles] },
+  });
+}
 
 // ── Dashboard ─────────────────────────────────────────────────────────────────
 
@@ -106,10 +140,16 @@ partnerRoutes.get('/dashboard', async (req: Request, res: Response, next: NextFu
       const subsByCourse = new Map<string, typeof subs>();
       subs.forEach(s => { const arr = subsByCourse.get(s.courseId) ?? []; arr.push(s); subsByCourse.set(s.courseId, arr); });
 
-      type SubFile = { label?: string; decision?: string };
-      const resolveAssignmentStatus = (label: string, subsForCourse: typeof subs): string => {
+      // Matches by assignment_id first (stable, collision-proof) — label is
+      // kept only as a fallback for submissions created before that field
+      // existed, so history from before this fix keeps resolving correctly.
+      type SubFile = { assignment_id?: string; label?: string; decision?: string };
+      const resolveAssignmentStatus = (assignmentId: string, label: string, subsForCourse: typeof subs): string => {
         for (const s of subsForCourse) { // newest-first (subs query ordered submittedAt desc)
-          const files = ((s.files as SubFile[]) ?? []).filter(f => f.label === label);
+          const allFiles = (s.files as SubFile[]) ?? [];
+          const files = allFiles.some(f => f.assignment_id === assignmentId)
+            ? allFiles.filter(f => f.assignment_id === assignmentId)
+            : allFiles.filter(f => !f.assignment_id && f.label === label);
           if (!files.length) continue;
           if (files.some(f => f.decision === 'redo')) return 'redo';
           if (files.every(f => f.decision === 'approved')) return 'approved';
@@ -129,7 +169,7 @@ partnerRoutes.get('/dashboard', async (req: Request, res: Response, next: NextFu
             const recipe = recipeMap.get(a.recipeId);
             const cuisineId = recipe?.cuisineId ?? a.cuisineId;
             const label = `${cuisineMap.get(cuisineId ?? '')?.name ?? ''} — ${recipe?.foodName ?? ''}`.trim();
-            return resolveAssignmentStatus(label, subsForCourse);
+            return resolveAssignmentStatus(a.id, label, subsForCourse);
           });
           submissionStatus = statuses.every(s => s === 'approved')
             ? 'approved'
@@ -453,21 +493,37 @@ partnerRoutes.get('/courses/:courseId/my-cook-assignments', async (req: Request,
     });
     const draftByAssignment = new Map(drafts.map(d => [d.assignmentId, d]));
 
-    // A product can now have multiple uploaded photos. Group each submission's
-    // files by label first, then — same as before — the most recent submission
-    // that has any files for a given label wins (older submissions only fill in
-    // labels a newer partial resubmission left out). Also remember that
-    // submission's overall feedback, so a comment left in the trainer's general
-    // remarks box (rather than on one specific photo) still surfaces per-product.
-    type SubFile = { label: string; path: string; decision?: string; remark?: string };
+    // A product can now have multiple uploaded photos. Files carry a stable
+    // assignment_id going forward (matched first, below) — label matching is
+    // kept only as a fallback for submissions created before that field
+    // existed, so old review history keeps resolving correctly. Within each
+    // key, the most recent submission that has any files wins (older
+    // submissions only fill in products a newer partial resubmission left
+    // out). Also remember that submission's overall feedback, so a comment
+    // left in the trainer's general remarks box surfaces per-product too.
+    type SubFile = { assignment_id?: string; label: string; path: string; decision?: string; remark?: string };
+    const filesByAssignmentId = new Map<string, SubFile[]>();
+    const feedbackByAssignmentId = new Map<string, string | null>();
     const labelToFiles = new Map<string, SubFile[]>();
     const labelToOverallFeedback = new Map<string, string | null>();
     for (const s of latestSub) {
       const files = (s.files as SubFile[]) ?? [];
+      const byIdThisSub = new Map<string, SubFile[]>();
       const byLabelThisSub = new Map<string, SubFile[]>();
       for (const f of files) {
-        if (!byLabelThisSub.has(f.label)) byLabelThisSub.set(f.label, []);
-        byLabelThisSub.get(f.label)!.push(f);
+        if (f.assignment_id) {
+          if (!byIdThisSub.has(f.assignment_id)) byIdThisSub.set(f.assignment_id, []);
+          byIdThisSub.get(f.assignment_id)!.push(f);
+        } else {
+          if (!byLabelThisSub.has(f.label)) byLabelThisSub.set(f.label, []);
+          byLabelThisSub.get(f.label)!.push(f);
+        }
+      }
+      for (const [id, fs] of byIdThisSub) {
+        if (!filesByAssignmentId.has(id)) {
+          filesByAssignmentId.set(id, fs);
+          feedbackByAssignmentId.set(id, s.feedback ?? null);
+        }
       }
       for (const [label, fs] of byLabelThisSub) {
         if (!labelToFiles.has(label)) {
@@ -482,7 +538,9 @@ partnerRoutes.get('/courses/:courseId/my-cook-assignments', async (req: Request,
       const cuisineId  = recipe?.cuisineId ?? a.cuisineId;
       const cuisine    = cuisineMap.get(cuisineId);
       const label   = `${cuisine?.name ?? ''} — ${recipe?.foodName ?? ''}`.trim();
-      const files   = labelToFiles.get(label) ?? [];
+      const matchedById = filesByAssignmentId.has(a.id);
+      const files   = filesByAssignmentId.get(a.id) ?? labelToFiles.get(label) ?? [];
+      const feedback = matchedById ? feedbackByAssignmentId.get(a.id) : labelToOverallFeedback.get(label);
       const status  = files.length === 0
         ? 'not_uploaded'
         : files.some(f => f.decision === 'redo')
@@ -520,7 +578,7 @@ partnerRoutes.get('/courses/:courseId/my-cook-assignments', async (req: Request,
         draft_uploads: draftUploads,
         admin_comment:
           uploads.find(u => u.remark)?.remark ??
-          labelToOverallFeedback.get(label) ??
+          feedback ??
           null,
       };
     }));
@@ -578,11 +636,10 @@ partnerRoutes.post('/courses/:courseId/submit-cook', async (req: Request, res: R
   try {
     const userId   = (req as AuthRequest).user.id;
     const courseId = req.params.courseId;
-    const sub = await prisma.lpProductSubmission.create({
-      data: { userId, courseId, files: req.body.files, notes: req.body.notes ?? null, submittedAt: new Date() },
-    });
+    const files: SubmissionFile[] = req.body.files ?? [];
+    const sub = await upsertIntoActiveSubmission(prisma, userId, courseId, files);
     await prisma.lpPartnerEvent.create({
-      data: { courseId, userId, eventType: 'product_submitted', payload: { submission_id: sub.id, file_count: req.body.files?.length ?? 0 } },
+      data: { courseId, userId, eventType: 'product_submitted', payload: { submission_id: sub.id, file_count: files.length } },
     });
     res.status(201).json({ id: sub.id });
   } catch (e) { next(e); }
@@ -658,15 +715,15 @@ partnerRoutes.post('/courses/:courseId/cook-drafts/:assignmentId/submit', async 
     const cuisine   = cuisineId ? await prisma.lpCuisine.findUnique({ where: { id: cuisineId } }) : null;
     const label     = `${cuisine?.name ?? ''} — ${recipe?.foodName ?? ''}`.trim();
 
-    const [updated, sub] = await prisma.$transaction([
-      prisma.lpProductUploadDraft.update({
+    const submissionFiles: SubmissionFile[] = files.map(f => ({ assignment_id: assignmentId, path: f.path, label }));
+    const [updated, sub] = await prisma.$transaction(async (tx) => {
+      const updatedDraft = await tx.lpProductUploadDraft.update({
         where: { assignmentId },
         data:  { status: 'submitted', submittedAt: new Date() },
-      }),
-      prisma.lpProductSubmission.create({
-        data: { userId, courseId, files: files.map(f => ({ path: f.path, label })), submittedAt: new Date() },
-      }),
-    ]);
+      });
+      const submission = await upsertIntoActiveSubmission(tx, userId, courseId, submissionFiles);
+      return [updatedDraft, submission] as const;
+    });
     await prisma.lpPartnerEvent.create({
       data: { courseId, userId, eventType: 'product_submitted', payload: { submission_id: sub.id, file_count: files.length, label } },
     });

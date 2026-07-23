@@ -206,6 +206,12 @@ export interface ReviewPartnerRow {
   certificate_code: string | null;
   certificate_issued_at: string | null;
   yet_to_start: boolean;
+  products_total: number;
+  products_submitted: number;
+  products_approved: number;
+  products_redo: number;
+  products_pending: number;
+  visit_status: string | null;
 }
 export interface ProductSubmission {
   id: string;
@@ -404,6 +410,8 @@ export const revokeInvite = (d: { id: string }) =>
   api.post(`/sft/invites/${d.id}/revoke`).then((r) => r.data);
 export const restoreInvite = (d: { id: string }) =>
   api.post(`/sft/invites/${d.id}/restore`).then((r) => r.data);
+export const deleteSftInvite = (d: { id: string }) =>
+  api.delete(`/sft/invites/${d.id}`).then((r) => r.data);
 export const sendPartnerLoginLink = (d: { invite_id: string }) =>
   api.post(`/sft/invites/${d.invite_id}/resend`).then((r) => r.data);
 export const listReviewPartners = (d?: {
