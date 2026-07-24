@@ -17,11 +17,18 @@ type SubmissionFile = { assignment_id?: string; path: string; label: string };
 // atomic action. Once reviewed (reviewedAt set), the next submit starts a
 // fresh round, and the reviewed one remains as read-only history.
 async function upsertIntoActiveSubmission(
-  db: Prisma.TransactionClient | typeof prisma,
+  db: Prisma.TransactionClient,
   userId: string,
   courseId: string,
   newFiles: SubmissionFile[],
 ) {
+  // Serializes "find the active round, then create-or-update it" per
+  // partner+course — without this, two near-simultaneous submits can both
+  // see "no active round" and each create their own, re-fragmenting what
+  // should be one review round. Held for the rest of this transaction only.
+  const lockKey = `${userId}:${courseId}`;
+  await db.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${lockKey})::bigint)`;
+
   const active = await db.lpProductSubmission.findFirst({
     where:   { userId, courseId, reviewedAt: null },
     orderBy: { submittedAt: 'desc' },
@@ -165,13 +172,24 @@ partnerRoutes.get('/dashboard', async (req: Request, res: Response, next: NextFu
         let submissionStatus: string | null;
         if (courseAssignments.length > 0) {
           const subsForCourse = subsByCourse.get(cid) ?? [];
+          const statusesByCuisine = new Map<string, string[]>();
           const statuses = courseAssignments.map(a => {
             const recipe = recipeMap.get(a.recipeId);
-            const cuisineId = recipe?.cuisineId ?? a.cuisineId;
-            const label = `${cuisineMap.get(cuisineId ?? '')?.name ?? ''} — ${recipe?.foodName ?? ''}`.trim();
-            return resolveAssignmentStatus(a.id, label, subsForCourse);
+            const cuisineId = recipe?.cuisineId ?? a.cuisineId ?? '';
+            const label = `${cuisineMap.get(cuisineId)?.name ?? ''} — ${recipe?.foodName ?? ''}`.trim();
+            const status = resolveAssignmentStatus(a.id, label, subsForCourse);
+            const arr = statusesByCuisine.get(cuisineId) ?? [];
+            arr.push(status);
+            statusesByCuisine.set(cuisineId, arr);
+            return status;
           });
-          submissionStatus = statuses.every(s => s === 'approved')
+          // Physical Visit eligibility: a partner can have several cuisines in
+          // flight at once, and finishing ONE of them fully (every product in
+          // it approved) is what unlocks Visit — not requiring every cuisine
+          // the partner has ever picked to be done.
+          const anyCuisineFullyApproved = [...statusesByCuisine.values()]
+            .some(group => group.length > 0 && group.every(s => s === 'approved'));
+          submissionStatus = anyCuisineFullyApproved
             ? 'approved'
             : statuses.some(s => s === 'redo')
               ? 'redo'
@@ -637,7 +655,7 @@ partnerRoutes.post('/courses/:courseId/submit-cook', async (req: Request, res: R
     const userId   = (req as AuthRequest).user.id;
     const courseId = req.params.courseId;
     const files: SubmissionFile[] = req.body.files ?? [];
-    const sub = await upsertIntoActiveSubmission(prisma, userId, courseId, files);
+    const sub = await prisma.$transaction((tx) => upsertIntoActiveSubmission(tx, userId, courseId, files));
     await prisma.lpPartnerEvent.create({
       data: { courseId, userId, eventType: 'product_submitted', payload: { submission_id: sub.id, file_count: files.length } },
     });

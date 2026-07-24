@@ -1253,13 +1253,75 @@ sftRoutes.get('/physical-visits', requirePhysicalVisit, async (req, res, next) =
     });
     const visitedUserIds = new Set(visits.map(v => v.userId));
 
-    // Find approved submissions whose partner has NO physical visit row yet
+    // A partner becomes eligible only once they've fully completed at least
+    // one whole cuisine (every assigned product in it submitted, reviewed,
+    // and approved) — not merely because any single product was approved.
+    // Pre-filter to partners with at least one approved file anywhere (cheap,
+    // and anyone with zero approvals can't possibly have a complete cuisine),
+    // then check each candidate's cuisines in full.
     const approvedSubs = await prisma.lpProductSubmission.findMany({
       where: { status: 'approved' },
       orderBy: { reviewedAt: 'desc' },
     });
-    const eligibleUserIds = [...new Set(approvedSubs.map(s => s.userId))]
+    const candidateUserIds = [...new Set(approvedSubs.map(s => s.userId))]
       .filter(uid => !visitedUserIds.has(uid));
+
+    const completedCuisineByUser = new Map<string, string>();
+    if (candidateUserIds.length) {
+      const [assignments, allSubsForCandidates] = await Promise.all([
+        prisma.lpProductAssignment.findMany({ where: { userId: { in: candidateUserIds } } }),
+        prisma.lpProductSubmission.findMany({
+          where: { userId: { in: candidateUserIds } },
+          orderBy: { submittedAt: 'desc' },
+        }),
+      ]);
+      const recipeIds = [...new Set(assignments.map(a => a.recipeId))];
+      const [recipes, cuisines] = await Promise.all([
+        recipeIds.length ? prisma.lpRecipe.findMany({ where: { id: { in: recipeIds } } }) : [],
+        prisma.lpCuisine.findMany({ where: { courseId: { in: [...new Set(assignments.map(a => a.courseId))] } } }),
+      ]);
+      const recipeMap = new Map(recipes.map(r => [r.id, r] as const));
+      const cuisineMap = new Map(cuisines.map(c => [c.id, c] as const));
+
+      const assignmentsByUser = new Map<string, typeof assignments>();
+      assignments.forEach(a => { const arr = assignmentsByUser.get(a.userId) ?? []; arr.push(a); assignmentsByUser.set(a.userId, arr); });
+      const subsByUserCourse = new Map<string, typeof allSubsForCandidates>();
+      allSubsForCandidates.forEach(s => { const k = `${s.userId}::${s.courseId}`; const arr = subsByUserCourse.get(k) ?? []; arr.push(s); subsByUserCourse.set(k, arr); });
+
+      type SubFile = { assignment_id?: string; label?: string; decision?: string };
+      const resolveStatus = (assignmentId: string, label: string, subsForKey: typeof allSubsForCandidates): string => {
+        for (const s of subsForKey) {
+          const allFiles = (s.files as SubFile[]) ?? [];
+          const files = allFiles.some(f => f.assignment_id === assignmentId)
+            ? allFiles.filter(f => f.assignment_id === assignmentId)
+            : allFiles.filter(f => !f.assignment_id && f.label === label);
+          if (!files.length) continue;
+          if (files.some(f => f.decision === 'redo')) return 'redo';
+          if (files.every(f => f.decision === 'approved')) return 'approved';
+          return 'pending';
+        }
+        return 'not_uploaded';
+      };
+
+      for (const uid of candidateUserIds) {
+        const userAssignments = assignmentsByUser.get(uid) ?? [];
+        const byCuisine = new Map<string, string[]>();
+        for (const a of userAssignments) {
+          const recipe = recipeMap.get(a.recipeId);
+          const cuisineId = recipe?.cuisineId ?? a.cuisineId ?? '';
+          const label = `${cuisineMap.get(cuisineId)?.name ?? ''} — ${recipe?.foodName ?? ''}`.trim();
+          const subsForKey = subsByUserCourse.get(`${uid}::${a.courseId}`) ?? [];
+          const status = resolveStatus(a.id, label, subsForKey);
+          const arr = byCuisine.get(cuisineId) ?? [];
+          arr.push(status);
+          byCuisine.set(cuisineId, arr);
+        }
+        const completedCuisineId = [...byCuisine.entries()]
+          .find(([, statuses]) => statuses.length > 0 && statuses.every(s => s === 'approved'))?.[0];
+        if (completedCuisineId) completedCuisineByUser.set(uid, completedCuisineId);
+      }
+    }
+    const eligibleUserIds = [...completedCuisineByUser.keys()];
 
     let eligibleRows: typeof visits = [];
     if (eligibleUserIds.length) {
@@ -1298,7 +1360,7 @@ sftRoutes.get('/physical-visits', requirePhysicalVisit, async (req, res, next) =
             partnerCountry: null,
             partnerPhone: null,
             partnerAddress: null,
-            cuisineId: null,
+            cuisineId: completedCuisineByUser.get(uid) ?? null,
             cuisineName: null,
             recipeId: null,
             assignedProducts: [],
