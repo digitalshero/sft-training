@@ -1,12 +1,11 @@
-// PM2 Ecosystem Config — Shero Backend
-// Usage: pm2 start ecosystem.config.js --env production
+// PM2 Ecosystem Config — Shero Backend Usage: pm2 start ecosystem.config.js --env production
 
 module.exports = {
   apps: [
     {
       name:           'shero-backend',
       script:         'dist/index.js',
-      instances:      'max',       // one per vCPU
+      instances:      1,       // one per vCPU
       exec_mode:      'cluster',
       env: {
         NODE_ENV: 'development',
