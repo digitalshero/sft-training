@@ -657,6 +657,24 @@ partnerRoutes.post('/courses/:courseId/submit-cook', async (req: Request, res: R
     const userId   = (req as AuthRequest).user.id;
     const courseId = req.params.courseId;
     const files: SubmissionFile[] = req.body.files ?? [];
+
+    // Every photo must be tied to one of this partner's own assigned
+    // products for this course — reject rather than silently filing a photo
+    // under a missing/mismatched/stale product_id (e.g. from a client bug
+    // sending a leftover assignment_id from a previously selected product).
+    if (files.some(f => !f.path || !f.assignment_id)) {
+      res.status(400).json({ error: 'Each photo must be linked to a product before it can be submitted' });
+      return;
+    }
+    const assignmentIds = [...new Set(files.map(f => f.assignment_id!))];
+    const ownedCount = await prisma.lpProductAssignment.count({
+      where: { id: { in: assignmentIds }, userId, courseId },
+    });
+    if (ownedCount !== assignmentIds.length) {
+      res.status(400).json({ error: 'One or more photos reference a product not assigned to you for this course' });
+      return;
+    }
+
     const sub = await prisma.$transaction((tx) => upsertIntoActiveSubmission(tx, userId, courseId, files));
     await prisma.lpPartnerEvent.create({
       data: { courseId, userId, eventType: 'product_submitted', payload: { submission_id: sub.id, file_count: files.length } },

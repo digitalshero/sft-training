@@ -631,7 +631,13 @@ function ProductChecklist({
                       ref={uploadSectionRef}
                       initial={{ opacity: 0, height: 0 }}
                       animate={{ opacity: 1, height: "auto" }}
-                      exit={{ opacity: 0, height: 0 }}
+                      // pointerEvents: 'none' takes effect immediately (not
+                      // interpolated) once exit starts — without it, the
+                      // outgoing product's still-visible "Choose image"
+                      // button stays tappable during the ~300ms fade-out,
+                      // and a mistimed touch (much more likely than a mouse
+                      // click) can attach a photo to the wrong product.
+                      exit={{ opacity: 0, height: 0, pointerEvents: "none" }}
                       transition={{ duration: 0.3 }}
                       className={`overflow-hidden rounded-2xl transition-shadow duration-500 ${
                         highlightId === a.recipe_id
@@ -960,7 +966,13 @@ function UploadZone({
                   accept="image/*"
                   className="hidden"
                   disabled={uploading || validating || persisting}
-                  onChange={(e) => e.target.files?.[0] && pick(e.target.files[0])}
+                  onChange={(e) => {
+                    const file = e.target.files?.[0];
+                    // Reset so re-picking the same filename (common when
+                    // retaking a photo on mobile) reliably re-fires onChange.
+                    e.target.value = "";
+                    if (file) pick(file);
+                  }}
                 />
                 {uploading || validating || persisting ? (
                   <Loader2 className="h-6 w-6 animate-spin text-success" />
