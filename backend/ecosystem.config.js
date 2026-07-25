@@ -6,7 +6,7 @@ module.exports = {
     {
       name:           'shero-backend',
       script:         'dist/index.js',
-      instances:      'max',       // one per vCPU
+      instances:      '1',       // one per vCPU
       exec_mode:      'cluster',
       env: {
         NODE_ENV: 'development',
