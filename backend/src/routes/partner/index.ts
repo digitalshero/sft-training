@@ -533,8 +533,10 @@ partnerRoutes.get('/courses/:courseId/my-cook-assignments', async (req: Request,
           if (!byIdThisSub.has(f.assignment_id)) byIdThisSub.set(f.assignment_id, []);
           byIdThisSub.get(f.assignment_id)!.push(f);
         } else {
-          if (!byLabelThisSub.has(f.label)) byLabelThisSub.set(f.label, []);
-          byLabelThisSub.get(f.label)!.push(f);
+          // Legacy files (pre-assignment_id) sharing a label are the same
+          // product's successive re-uploads, not distinct photos — keep only
+          // the most recently appended one per label.
+          byLabelThisSub.set(f.label, [f]);
         }
       }
       for (const [id, fs] of byIdThisSub) {

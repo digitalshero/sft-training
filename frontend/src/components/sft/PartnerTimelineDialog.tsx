@@ -62,27 +62,22 @@ function fmtPrecise(d: string | null | undefined) {
   return formatDateTimeETPrecise(d);
 }
 
-type SubmissionFile = {
+type ProductFile = {
   path: string;
-  label?: string | null;
+  url: string;
   decision?: "approved" | "redo" | null;
   remark?: string | null;
 };
 
-type SubmissionWithSignedFiles = {
-  id: string;
+type ProductRow = {
+  assignment_id: string;
+  cuisine_name: string;
+  product_name: string;
+  files_signed: ProductFile[];
+  submission_id: string;
   submitted_at: string;
   reviewed_at: string | null;
   feedback?: string | null;
-  notes?: string | null;
-  status: string;
-  files_signed: Array<{
-    path: string;
-    label?: string | null;
-    url: string;
-    decision?: "approved" | "redo" | null;
-    remark?: string | null;
-  }>;
 };
 
 type PartnerTimelineData = {
@@ -103,7 +98,7 @@ type PartnerTimelineData = {
     completed_at: string | null;
     progress_pct?: number | null;
   }>;
-  submissions: SubmissionWithSignedFiles[];
+  products: ProductRow[];
   certificate?: { id: string; code: string; issued_at: string | null } | null;
   timeline: Array<{
     title: string;
@@ -252,37 +247,33 @@ export function PartnerTimelineDialog({
               </div>
             </section>
 
-            {/* Product submissions (date-wise; newest first) */}
+            {/* Product submissions — one entry per product, showing only its
+                latest uploaded photo(s); older redo'd/superseded uploads are
+                not shown here (still kept in the database as history). */}
             <section>
               <h3 className="mb-2 flex items-center gap-2 text-sm font-semibold">
                 <FileImage className="h-4 w-4" /> Product submissions
                 <span className="text-xs font-normal text-muted-foreground">
-                  ({data.submissions.length}{" "}
-                  {data.submissions.length === 1 ? "round" : "rounds"})
+                  ({data.products.length}{" "}
+                  {data.products.length === 1 ? "product" : "products"})
                 </span>
               </h3>
-              {data.submissions.length === 0 ? (
+              {data.products.length === 0 ? (
                 <div className="rounded-md border border-dashed p-4 text-sm text-muted-foreground">
                   Partner has not uploaded product photos yet.
                 </div>
               ) : (
-                <div className="space-y-4">
-                  {data.submissions.map((sub, idx) => (
-                    <SubmissionReviewCard
-                      key={sub.id}
-                      submission={sub}
-                      isLatest={idx === 0}
-                      partnerName={
-                        data.partner.display_name ||
-                        data.invite?.recipient_name ||
-                        "Partner"
-                      }
-                      partnerEmail={data.partner.email}
-                      courseTitle={data.course.title}
-                      inviteId={inviteId}
-                    />
-                  ))}
-                </div>
+                <ProductReviewPanel
+                  products={data.products}
+                  partnerName={
+                    data.partner.display_name ||
+                    data.invite?.recipient_name ||
+                    "Partner"
+                  }
+                  partnerEmail={data.partner.email}
+                  courseTitle={data.course.title}
+                  inviteId={inviteId}
+                />
               )}
             </section>
 
@@ -384,16 +375,108 @@ export function PartnerTimelineDialog({
   );
 }
 
-function SubmissionReviewCard({
-  submission,
-  isLatest,
+function fileKey(assignmentId: string, path: string) {
+  return `${assignmentId}::${path}`;
+}
+
+// Renders every assigned product's latest submission exactly once: the
+// single in-flight (unreviewed) round — if any — as one editable card, and
+// every already-reviewed product as a read-only summary. There is at most
+// one unreviewed round per partner+course at a time, so all "pending"
+// products below always share one submission_id.
+function ProductReviewPanel({
+  products,
   partnerName,
   partnerEmail,
   courseTitle,
   inviteId,
 }: {
-  submission: SubmissionWithSignedFiles;
-  isLatest: boolean;
+  products: ProductRow[];
+  partnerName: string;
+  partnerEmail: string;
+  courseTitle: string;
+  inviteId: string;
+}) {
+  const pending = products.filter((p) => !p.reviewed_at);
+  const decided = products.filter((p) => p.reviewed_at);
+
+  return (
+    <div className="space-y-4">
+      {pending.length > 0 && (
+        <PendingReviewCard
+          products={pending}
+          partnerName={partnerName}
+          partnerEmail={partnerEmail}
+          courseTitle={courseTitle}
+          inviteId={inviteId}
+        />
+      )}
+      {decided.length > 0 && (
+        <div className="space-y-2 rounded-md border p-3">
+          <div className="text-sm font-medium">Reviewed products</div>
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            {decided.map((p) => {
+              const redo = p.files_signed.some((f) => f.decision === "redo");
+              const remark = p.files_signed.find((f) => f.remark)?.remark;
+              return (
+                <div
+                  key={p.assignment_id}
+                  className="space-y-2 rounded-md border p-2"
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="min-w-0">
+                      <div className="truncate text-xs text-muted-foreground">
+                        {p.cuisine_name}
+                      </div>
+                      <div className="truncate text-sm font-medium">
+                        {p.product_name}
+                      </div>
+                    </div>
+                    <StatusBadge value={redo ? "redo" : "approved"} />
+                  </div>
+                  <div className="grid grid-cols-2 gap-2">
+                    {p.files_signed.map((f) => (
+                      <a
+                        key={f.path}
+                        href={f.url}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="block aspect-square overflow-hidden rounded bg-muted"
+                      >
+                        <img
+                          src={f.url}
+                          alt={p.product_name}
+                          className="h-full w-full object-cover"
+                        />
+                      </a>
+                    ))}
+                  </div>
+                  {remark && (
+                    <div className="rounded bg-muted/50 p-2 text-xs">
+                      {remark}
+                    </div>
+                  )}
+                  <div className="text-xs text-muted-foreground">
+                    Reviewed {fmt(p.reviewed_at)}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function PendingReviewCard({
+  products,
+  partnerName,
+  partnerEmail,
+  courseTitle,
+  inviteId,
+}: {
+  products: ProductRow[];
   partnerName: string;
   partnerEmail: string;
   courseTitle: string;
@@ -401,77 +484,85 @@ function SubmissionReviewCard({
 }) {
   const qc = useQueryClient();
   const fnSave = reviewProductSubmissionPerFile;
-  const reviewed = !!submission.reviewed_at;
-  const locked = reviewed && !isLatest; // older rounds are read-only
+  const submissionId = products[0].submission_id;
+  const submittedAt = products[0].submitted_at;
 
-  const initialFiles: SubmissionFile[] = (submission.files_signed ?? []).map(
-    (f) => ({
-      path: f.path,
-      label: f.label,
-      decision: f.decision,
-      remark: f.remark,
-    }),
+  const [decisions, setDecisions] = useState<
+    Record<string, { decision?: "approved" | "redo"; remark?: string }>
+  >({});
+  const [feedback, setFeedback] = useState<string>(
+    products[0].feedback ?? "",
   );
-  const [files, setFiles] = useState<SubmissionFile[]>(initialFiles);
-  const [feedback, setFeedback] = useState<string>(submission.feedback ?? "");
 
-  const allDecided = files.every(
-    (f) => f.decision === "approved" || f.decision === "redo",
+  const allFileKeys = products.flatMap((p) =>
+    p.files_signed.map((f) => fileKey(p.assignment_id, f.path)),
   );
-  const anyRedo = files.some((f) => f.decision === "redo");
+  const allDecided = allFileKeys.every(
+    (k) =>
+      decisions[k]?.decision === "approved" ||
+      decisions[k]?.decision === "redo",
+  );
+  const anyRedo = allFileKeys.some((k) => decisions[k]?.decision === "redo");
 
   const save = useMutation({
     mutationFn: () =>
       fnSave({
-        id: submission.id,
+        id: submissionId,
         decision: "approved",
         feedback: feedback || undefined,
-        files: files.map((f) => ({
-          path: f.path,
-          label: f.label,
-          decision: (f.decision ?? "approved") as "approved" | "redo",
-          remark: f.remark || undefined,
-        })),
+        files: products.flatMap((p) =>
+          p.files_signed.map((f) => {
+            const key = fileKey(p.assignment_id, f.path);
+            return {
+              assignment_id: p.assignment_id,
+              label: `${p.cuisine_name} — ${p.product_name}`.trim(),
+              path: f.path,
+              decision: (decisions[key]?.decision ?? "approved") as
+                | "approved"
+                | "redo",
+              remark: decisions[key]?.remark || undefined,
+            };
+          }),
+        ),
       }),
-    onSuccess: (res) => {
-      toast.success(
-        res.status === "approved" ? "Approved" : "Marked for approved",
-      );
+    onSuccess: () => {
+      toast.success("Review saved");
       qc.invalidateQueries({ queryKey: ["lp-partner-timeline", inviteId] });
       qc.invalidateQueries({ queryKey: ["lp-review-partners"] });
     },
     onError: (e: Error) => toast.error(e.message),
   });
 
-  function setFileDecision(idx: number, decision: "approved" | "redo") {
-    setFiles((prev) =>
-      prev.map((f, i) => (i === idx ? { ...f, decision } : f)),
-    );
+  function setDecision(key: string, decision: "approved" | "redo") {
+    setDecisions((prev) => ({ ...prev, [key]: { ...prev[key], decision } }));
   }
-  function setFileRemark(idx: number, remark: string) {
-    setFiles((prev) => prev.map((f, i) => (i === idx ? { ...f, remark } : f)));
+  function setRemark(key: string, remark: string) {
+    setDecisions((prev) => ({ ...prev, [key]: { ...prev[key], remark } }));
   }
 
   function composeRedoMailto() {
-    const rejected = (submission.files_signed ?? [])
-      .map((f, i) => ({
-        ...f,
-        decision: files[i]?.decision,
-        remark: files[i]?.remark,
-      }))
-      .filter((f) => f.decision === "redo");
+    const rejected = products.flatMap((p) =>
+      p.files_signed
+        .map((f) => ({
+          ...f,
+          product_name: p.product_name,
+          cuisine_name: p.cuisine_name,
+          ...decisions[fileKey(p.assignment_id, f.path)],
+        }))
+        .filter((f) => f.decision === "redo"),
+    );
     const subject = `Action needed: please redo ${rejected.length} product photo${rejected.length === 1 ? "" : "s"} — ${courseTitle}`;
     const lines: string[] = [];
     lines.push(`Hi ${partnerName},`, "");
     lines.push(
-      `Thank you for submitting your photos on ${formatDateTimeET(submission.submitted_at)}.`,
+      `Thank you for submitting your photos on ${formatDateTimeET(submittedAt)}.`,
     );
     lines.push(
       `We need you to redo the following ${rejected.length} item${rejected.length === 1 ? "" : "s"}:`,
       "",
     );
     rejected.forEach((f, i) => {
-      lines.push(`${i + 1}. ${f.label ?? f.path.split("/").pop()}`);
+      lines.push(`${i + 1}. ${f.cuisine_name} — ${f.product_name}`);
       lines.push(`   Photo: ${f.url}`);
       if (f.remark) lines.push(`   What to fix: ${f.remark}`);
       lines.push("");
@@ -490,127 +581,113 @@ function SubmissionReviewCard({
     <div className="space-y-3 rounded-md border p-3">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="text-sm">
-          <span className="font-medium">
-            {isLatest ? "Latest round" : "Earlier round"}
-          </span>
+          <span className="font-medium">Needs review</span>
           <span className="ml-2 text-xs text-muted-foreground">
-            Submitted {fmt(submission.submitted_at)}
-            {submission.reviewed_at && (
-              <> · Reviewed {fmt(submission.reviewed_at)}</>
-            )}
+            Submitted {fmt(submittedAt)}
           </span>
         </div>
-        <StatusBadge value={submission.status} />
+        <StatusBadge value="pending" />
       </div>
 
-      {submission.notes && (
-        <div className="rounded bg-muted/50 p-2 text-xs">
-          <span className="font-medium">Partner notes:</span> {submission.notes}
-        </div>
-      )}
-
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-        {(submission.files_signed ?? []).map((f, idx) => {
-          const decision = files[idx]?.decision;
-          const remark = files[idx]?.remark ?? "";
-          return (
-            <div key={f.path} className="space-y-2 rounded-md border p-2">
-              <a
-                href={f.url}
-                target="_blank"
-                rel="noreferrer"
-                className="block aspect-square overflow-hidden rounded bg-muted"
-              >
-                <img
-                  src={f.url}
-                  alt={f.label ?? "submission"}
-                  className="h-full w-full object-cover"
-                />
-              </a>
-              <div
-                className="truncate text-xs text-muted-foreground"
-                title={f.label ?? f.path}
-              >
-                {f.label ?? f.path.split("/").pop()}
-              </div>
-              <div className="flex gap-1">
-                <Button
-                  type="button"
-                  size="sm"
-                  disabled={locked}
-                  variant={decision === "approved" ? "default" : "outline"}
-                  className={
-                    decision === "approved"
-                      ? "flex-1 bg-emerald-600 hover:bg-emerald-600/90"
-                      : "flex-1"
-                  }
-                  onClick={() => setFileDecision(idx, "approved")}
+        {products.flatMap((p) =>
+          p.files_signed.map((f) => {
+            const key = fileKey(p.assignment_id, f.path);
+            const decision = decisions[key]?.decision;
+            const remark = decisions[key]?.remark ?? "";
+            return (
+              <div key={key} className="space-y-2 rounded-md border p-2">
+                <a
+                  href={f.url}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="block aspect-square overflow-hidden rounded bg-muted"
                 >
-                  <CheckCircle2 className="mr-1 h-3.5 w-3.5" /> Right
-                </Button>
-                <Button
-                  type="button"
-                  size="sm"
-                  disabled={locked}
-                  variant={decision === "redo" ? "default" : "outline"}
-                  className={
-                    decision === "redo"
-                      ? "flex-1 bg-orange-600 hover:bg-orange-600/90"
-                      : "flex-1"
-                  }
-                  onClick={() => setFileDecision(idx, "redo")}
+                  <img
+                    src={f.url}
+                    alt={p.product_name}
+                    className="h-full w-full object-cover"
+                  />
+                </a>
+                <div
+                  className="truncate text-xs text-muted-foreground"
+                  title={`${p.cuisine_name} — ${p.product_name}`}
                 >
-                  <RotateCcw className="mr-1 h-3.5 w-3.5" /> Redo
-                </Button>
+                  {p.cuisine_name} — {p.product_name}
+                </div>
+                <div className="flex gap-1">
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant={decision === "approved" ? "default" : "outline"}
+                    className={
+                      decision === "approved"
+                        ? "flex-1 bg-emerald-600 hover:bg-emerald-600/90"
+                        : "flex-1"
+                    }
+                    onClick={() => setDecision(key, "approved")}
+                  >
+                    <CheckCircle2 className="mr-1 h-3.5 w-3.5" /> Right
+                  </Button>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant={decision === "redo" ? "default" : "outline"}
+                    className={
+                      decision === "redo"
+                        ? "flex-1 bg-orange-600 hover:bg-orange-600/90"
+                        : "flex-1"
+                    }
+                    onClick={() => setDecision(key, "redo")}
+                  >
+                    <RotateCcw className="mr-1 h-3.5 w-3.5" /> Redo
+                  </Button>
+                </div>
+                {decision === "redo" && (
+                  <Textarea
+                    rows={2}
+                    placeholder="What to fix on this photo…"
+                    value={remark}
+                    onChange={(e) => setRemark(key, e.target.value)}
+                  />
+                )}
               </div>
-              {decision === "redo" && (
-                <Textarea
-                  rows={2}
-                  disabled={locked}
-                  placeholder="What to fix on this photo…"
-                  value={remark}
-                  onChange={(e) => setFileRemark(idx, e.target.value)}
-                />
-              )}
-            </div>
-          );
-        })}
+            );
+          }),
+        )}
       </div>
 
       <Textarea
         rows={2}
-        disabled={locked}
         placeholder="Overall remarks to include in the email (optional)…"
         value={feedback}
         onChange={(e) => setFeedback(e.target.value)}
       />
 
-      {!locked && (
-        <div className="flex flex-wrap items-center gap-2">
-          <Button
-            size="sm"
-            disabled={!allDecided || save.isPending}
-            onClick={() => save.mutate()}
-          >
-            {save.isPending ? (
-              <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />
-            ) : (
-              <CheckCircle2 className="mr-1 h-3.5 w-3.5" />
-            )}
-            Save review
+      <div className="flex flex-wrap items-center gap-2">
+        <Button
+          size="sm"
+          disabled={!allDecided || save.isPending}
+          onClick={() => save.mutate()}
+        >
+          {save.isPending ? (
+            <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />
+          ) : (
+            <CheckCircle2 className="mr-1 h-3.5 w-3.5" />
+          )}
+          Save review
+        </Button>
+        {anyRedo && (
+          <Button size="sm" variant="outline" onClick={composeRedoMailto}>
+            <XCircle className="mr-1 h-3.5 w-3.5" /> Compose redo email
           </Button>
-          {anyRedo && (
-            <Button size="sm" variant="outline" onClick={composeRedoMailto}>
-              <XCircle className="mr-1 h-3.5 w-3.5" /> Compose redo email
-            </Button>
-          )}
-          {!allDecided && (
-            <span className="text-xs text-muted-foreground">
-              Mark every photo as Right or Redo to save.
-            </span>
-          )}
-        </div>
-      )}
+        )}
+        {!allDecided && (
+          <span className="text-xs text-muted-foreground">
+            Mark every photo as Right or Redo to save.
+          </span>
+        )}
+      </div>
     </div>
   );
 }
