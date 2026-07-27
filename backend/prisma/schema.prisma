@@ -851,6 +851,7 @@ model LpProductAssignment {
   recipeId  String   @map("recipe_id")
   createdAt DateTime @default(now()) @map("created_at")
 
+  @@unique([userId, courseId, cuisineId, recipeId])
   @@index([userId, courseId])
   @@map("lp_product_assignments")
 }
