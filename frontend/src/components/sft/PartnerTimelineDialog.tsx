@@ -453,7 +453,7 @@ function ProductReviewPanel({
                   </div>
                   {remark && (
                     <div className="rounded bg-muted/50 p-2 text-xs">
-                      {remark}
+                      <span className="font-medium">Admin note:</span> {remark}
                     </div>
                   )}
                   <div className="text-xs text-muted-foreground">
@@ -643,14 +643,16 @@ function PendingReviewCard({
                     <RotateCcw className="mr-1 h-3.5 w-3.5" /> Redo
                   </Button>
                 </div>
-                {decision === "redo" && (
-                  <Textarea
-                    rows={2}
-                    placeholder="What to fix on this photo…"
-                    value={remark}
-                    onChange={(e) => setRemark(key, e.target.value)}
-                  />
-                )}
+                <Textarea
+                  rows={2}
+                  placeholder={
+                    decision === "redo"
+                      ? "What to fix on this photo…"
+                      : "Notes for this photo (optional)…"
+                  }
+                  value={remark}
+                  onChange={(e) => setRemark(key, e.target.value)}
+                />
               </div>
             );
           }),
