@@ -1,5 +1,5 @@
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import { motion, type Variants } from "framer-motion";
 import {
@@ -7,6 +7,10 @@ import {
   getPartnerInsights,
   type PartnerCertificate,
 } from "@/lib/partner/partner.functions";
+import {
+  getCoursePopupStatus,
+  acknowledgeCoursePopup,
+} from "@/lib/learning/learning.functions";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import {
@@ -73,6 +77,7 @@ function ShineOverlay() {
 
 function PartnerHubPage() {
   const navigate = useNavigate();
+  const qc = useQueryClient();
   const fnDash = getPartnerDashboard;
   const dashQ = useQuery({
     queryKey: ["partner-dash"],
@@ -115,26 +120,37 @@ function PartnerHubPage() {
     : 0;
   const animatedPct = useAnimatedPercent(pct);
 
+  // Durable, once-per-course "has this popup already been shown" record —
+  // mirrors the per-day completion popup's ack so it survives refresh,
+  // re-login, and other devices instead of resetting whenever browser
+  // storage is cleared.
+  const coursePopupStatusQ = useQuery<{ acknowledged: boolean }>({
+    queryKey: ["lp-course-popup-status", primaryInvite?.course_id],
+    queryFn: () => getCoursePopupStatus({ courseId: primaryInvite!.course_id }),
+    enabled: !!primaryInvite,
+  });
+  const ackCoursePopupM = useMutation({
+    mutationFn: (courseId: string) => acknowledgeCoursePopup({ courseId }),
+    onSuccess: (_data, courseId) =>
+      qc.invalidateQueries({ queryKey: ["lp-course-popup-status", courseId] }),
+  });
+
   // All 5 days finished and Prepare & Cook hasn't been started yet — let the
   // partner know the next stage just unlocked, once per course.
   const [cookUnlock, setCookUnlock] = useState(false);
   useEffect(() => {
-    if (typeof window === "undefined" || !primaryInvite) return;
+    if (!primaryInvite || !coursePopupStatusQ.data) return;
     if (pct !== 100 || prog.submission_status) return;
-    const key = `shero:cook-unlocked:${primaryInvite.course_id}`;
-    if (window.localStorage.getItem(key)) return;
+    if (coursePopupStatusQ.data.acknowledged) return;
     setCookUnlock(true);
-  }, [pct, prog.submission_status, primaryInvite]);
+    ackCoursePopupM.mutate(primaryInvite.course_id);
+    // ackCoursePopupM is a stable useMutation reference and intentionally
+    // excluded from deps — this effect must re-run when new progress/status
+    // data arrives, not on every mutation object identity change.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pct, prog.submission_status, primaryInvite, coursePopupStatusQ.data]);
 
-  const dismissCookUnlock = () => {
-    if (primaryInvite && typeof window !== "undefined") {
-      window.localStorage.setItem(
-        `shero:cook-unlocked:${primaryInvite.course_id}`,
-        "1",
-      );
-    }
-    setCookUnlock(false);
-  };
+  const dismissCookUnlock = () => setCookUnlock(false);
 
   if (dashQ.isLoading) {
     return (
@@ -578,8 +594,8 @@ function PartnerHubPage() {
         open={cookUnlock}
         onOpenChange={(o) => !o && dismissCookUnlock()}
         icon={ChefHat}
-        title="Prepare & Cook unlocked!"
-        description="You've finished all 5 learning days."
+        title="Congratulations on completion of Day-5!"
+        description="Now you can start Learn & Cook."
         body="Next up: pick your cuisines and upload photos of your dishes for review."
         footer={
           <>

@@ -715,6 +715,7 @@ sftRoutes.delete('/invites/:id', requireCourseBuilderOrInviteCertify, async (req
           tx.lpCertificate.deleteMany({ where: { userId, courseId } }),
           tx.lpPartnerCertificate.deleteMany({ where: { userId, courseId } }),
           tx.lpDayCompletionAck.deleteMany({ where: { userId, courseId } }),
+          tx.lpCourseCompletionAck.deleteMany({ where: { userId, courseId } }),
           tx.lpPhysicalVisit.deleteMany({ where: { userId, courseId } }), // children cascade automatically
           tx.lpPartnerEvent.deleteMany({ where: { userId, courseId } }),
           moduleIds.length ? tx.lpModuleProgress.deleteMany({ where: { userId, moduleId: { in: moduleIds } } }) : Promise.resolve(),

@@ -233,6 +233,33 @@ learningRoutes.post('/days/:dayId/acknowledge-popup', async (req: Request, res: 
   } catch (e) { next(e); }
 });
 
+// ── Course-completion popup ("all days done"), shown once per partner ───────
+
+learningRoutes.get('/courses/:courseId/course-popup-status', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const userId   = (req as AuthRequest).user.id;
+    const courseId = req.params.courseId;
+    const ack = await prisma.lpCourseCompletionAck.findUnique({
+      where:  { userId_courseId: { userId, courseId } },
+      select: { id: true },
+    });
+    res.json({ acknowledged: !!ack });
+  } catch (e) { next(e); }
+});
+
+learningRoutes.post('/courses/:courseId/acknowledge-course-popup', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const userId   = (req as AuthRequest).user.id;
+    const courseId = req.params.courseId;
+    await prisma.lpCourseCompletionAck.upsert({
+      where:  { userId_courseId: { userId, courseId } },
+      create: { userId, courseId },
+      update: {},
+    });
+    res.json({ ok: true });
+  } catch (e) { next(e); }
+});
+
 // ── Deck slides (parsed server-side, cached) ─────────────────────────────────
 
 learningRoutes.get('/modules/:moduleId/slides', async (req: Request, res: Response, next: NextFunction) => {

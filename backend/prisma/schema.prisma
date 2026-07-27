@@ -461,6 +461,7 @@ model LpCourse {
   inspectionSlots    LpInspectionSlot[]
   partnerResources   SftPartnerResource[]
   videos             SftVideo[]
+  courseCompletionAcks LpCourseCompletionAck[]
 
   @@map("lp_courses")
 }
@@ -565,6 +566,20 @@ model LpDayCompletionAck {
 
   @@unique([userId, dayId])
   @@map("lp_day_completion_acks")
+}
+
+// Same durability guarantee as LpDayCompletionAck, for the one-time
+// "all days done — Prepare & Cook unlocked" popup on the Partner Hub.
+model LpCourseCompletionAck {
+  id       String   @id @default(uuid())
+  userId   String   @map("user_id")
+  courseId String   @map("course_id")
+  shownAt  DateTime @default(now()) @map("shown_at")
+
+  course LpCourse @relation(fields: [courseId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, courseId])
+  @@map("lp_course_completion_acks")
 }
 
 model LpModuleQuizAttempt {

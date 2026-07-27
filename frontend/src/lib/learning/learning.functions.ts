@@ -327,6 +327,16 @@ export const acknowledgeDayPopup = (d: { dayId: string }) =>
   api
     .post(`/learning/days/${d.dayId}/acknowledge-popup`)
     .then((r) => r.data);
+export const getCoursePopupStatus = (d: {
+  courseId: string;
+}): Promise<{ acknowledged: boolean }> =>
+  api
+    .get(`/learning/courses/${d.courseId}/course-popup-status`)
+    .then((r) => r.data);
+export const acknowledgeCoursePopup = (d: { courseId: string }) =>
+  api
+    .post(`/learning/courses/${d.courseId}/acknowledge-course-popup`)
+    .then((r) => r.data);
 export const getModuleNote = (d: {
   moduleId: string;
 }): Promise<{ body: string; updated_at: string | null }> =>
