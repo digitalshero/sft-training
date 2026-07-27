@@ -444,41 +444,72 @@ partnerRoutes.get('/courses/:courseId/cuisines', async (req: Request, res: Respo
   } catch (e) { next(e); }
 });
 
+type ChooseCuisineResult =
+  | { ok: true; already: true }
+  | { ok: true; assigned: number }
+  | { ok: false; status: number; error: string };
+
+// Serializes "check existing → pick recipes → insert" per partner+course+cuisine.
+// Without this, two near-simultaneous choose-cuisine calls (double-tap, retry
+// after a flaky mobile network) can both pass the "not yet assigned" check
+// before either finishes, each then insert its own full set of assignment
+// rows for the same cuisine — the root cause behind partners ending up with
+// duplicate/unreachable product cards in Prepare & Cook and duplicate photos
+// in SFT Review. Same lock pattern as upsertIntoActiveSubmission above.
+async function chooseCuisineForCourse(
+  db: Prisma.TransactionClient,
+  userId: string,
+  courseId: string,
+  cuisineId: string,
+): Promise<ChooseCuisineResult> {
+  const lockKey = `choose-cuisine:${userId}:${courseId}:${cuisineId}`;
+  await db.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${lockKey})::bigint)`;
+
+  const existing = await db.lpProductAssignment.findFirst({ where: { userId, courseId, cuisineId } });
+  if (existing) return { ok: true, already: true };
+
+  const [course, chosenCuisineIds] = await Promise.all([
+    db.lpCourse.findUniqueOrThrow({ where: { id: courseId }, select: { maxCuisines: true } }),
+    db.lpProductAssignment.findMany({ where: { userId, courseId }, select: { cuisineId: true }, distinct: ['cuisineId'] }),
+  ]);
+  if (course.maxCuisines != null && chosenCuisineIds.length >= course.maxCuisines) {
+    return { ok: false, status: 400, error: `You can select up to ${course.maxCuisines} cuisine${course.maxCuisines === 1 ? '' : 's'} for this course.` };
+  }
+
+  const cuisine = await db.lpCuisine.findUniqueOrThrow({ where: { id: cuisineId } });
+  if (cuisine.courseId !== courseId) return { ok: false, status: 400, error: 'Cuisine not in course' };
+
+  const recipes = await db.lpRecipe.findMany({
+    where:   { cuisineId, active: true },
+    orderBy: { sortOrder: 'asc' },
+  });
+  if (!recipes.length) return { ok: false, status: 400, error: 'No active products in this cuisine' };
+
+  const take   = cuisine.showCount > 0 ? Math.min(cuisine.showCount, recipes.length) : recipes.length;
+  const picked = recipes.sort(() => Math.random() - 0.5).slice(0, take);
+
+  await db.lpProductAssignment.createMany({
+    data: picked.map(r => ({ userId, courseId, cuisineId, recipeId: r.id })),
+  });
+  return { ok: true, assigned: picked.length };
+}
+
 partnerRoutes.post('/courses/:courseId/choose-cuisine', async (req: Request, res: Response, next: NextFunction) => {
   try {
     const userId   = (req as AuthRequest).user.id;
     const courseId = req.params.courseId;
     const { cuisineId } = req.body as { cuisineId: string };
 
-    const existing = await prisma.lpProductAssignment.findFirst({ where: { userId, courseId, cuisineId } });
-    if (existing) { res.json({ ok: true, already: true }); return; }
-
-    const [course, chosenCuisineIds] = await Promise.all([
-      prisma.lpCourse.findUniqueOrThrow({ where: { id: courseId }, select: { maxCuisines: true } }),
-      prisma.lpProductAssignment.findMany({ where: { userId, courseId }, select: { cuisineId: true }, distinct: ['cuisineId'] }),
-    ]);
-    if (course.maxCuisines != null && chosenCuisineIds.length >= course.maxCuisines) {
-      res.status(400).json({ error: `You can select up to ${course.maxCuisines} cuisine${course.maxCuisines === 1 ? '' : 's'} for this course.` });
-      return;
-    }
-
-    const cuisine = await prisma.lpCuisine.findUniqueOrThrow({ where: { id: cuisineId } });
-    if (cuisine.courseId !== courseId) { res.status(400).json({ error: 'Cuisine not in course' }); return; }
-
-    const recipes = await prisma.lpRecipe.findMany({
-      where:   { cuisineId, active: true },
-      orderBy: { sortOrder: 'asc' },
-    });
-    if (!recipes.length) { res.status(400).json({ error: 'No active products in this cuisine' }); return; }
-
-    const take    = cuisine.showCount > 0 ? Math.min(cuisine.showCount, recipes.length) : recipes.length;
-    const picked  = recipes.sort(() => Math.random() - 0.5).slice(0, take);
-
-    await prisma.lpProductAssignment.createMany({
-      data: picked.map(r => ({ userId, courseId, cuisineId, recipeId: r.id })),
-    });
-    res.json({ ok: true, assigned: picked.length });
-  } catch (e) { next(e); }
+    const result = await prisma.$transaction(tx => chooseCuisineForCourse(tx, userId, courseId, cuisineId));
+    if (!result.ok) { res.status(result.status).json({ error: result.error }); return; }
+    res.json(result);
+  } catch (e: any) {
+    // Defense-in-depth backstop once the DB-level unique constraint is in
+    // place — the advisory lock above should already prevent this in
+    // practice, so this only degrades gracefully rather than 500ing.
+    if (e?.code === 'P2002') { res.json({ ok: true, already: true }); return; }
+    next(e);
+  }
 });
 
 partnerRoutes.get('/courses/:courseId/my-cook-assignments', async (req: Request, res: Response, next: NextFunction) => {

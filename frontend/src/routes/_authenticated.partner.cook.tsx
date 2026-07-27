@@ -487,7 +487,7 @@ function ProductChecklist({
   // Products still needing the partner's attention right now.
   const actionable = assignments.filter((a) => !isProductResolved(a));
   const active =
-    assignments.find((a) => a.recipe_id === activeId) ??
+    assignments.find((a) => a.assignment_id === activeId) ??
     actionable[0] ??
     assignments[0] ??
     null;
@@ -515,7 +515,7 @@ function ProductChecklist({
       const submitted = assignments.find((a) => a.assignment_id === assignmentId);
       const nextUp = actionable.find((a) => a.assignment_id !== assignmentId);
       if (nextUp) {
-        setActiveId(nextUp.recipe_id);
+        setActiveId(nextUp.assignment_id);
         if (submitted) {
           toast.message(`Now upload ${nextUp.food_name}.`);
         }
@@ -579,17 +579,17 @@ function ProductChecklist({
         </CardHeader>
         <CardContent className="space-y-2.5">
           {assignments.map((a) => {
-            const isActive = a.recipe_id === active?.recipe_id;
+            const isActive = a.assignment_id === active?.assignment_id;
             const thumb =
               a.draft_uploads[0]?.url ??
               a.uploads[0]?.url ??
               a.image_url ??
               null;
             return (
-              <Fragment key={a.recipe_id}>
+              <Fragment key={a.assignment_id}>
                 <button
                   onClick={() => {
-                    setActiveId(a.recipe_id);
+                    setActiveId(a.assignment_id);
                     toast.message("Please upload one photo and submit it for review.");
                   }}
                   className={`flex w-full items-center gap-3 rounded-xl border p-3 text-left transition ${
@@ -630,7 +630,7 @@ function ProductChecklist({
                 <AnimatePresence>
                   {isActive && (
                     <motion.div
-                      id={`upload-section-${a.recipe_id}`}
+                      id={`upload-section-${a.assignment_id}`}
                       ref={uploadSectionRef}
                       initial={{ opacity: 0, height: 0 }}
                       animate={{ opacity: 1, height: "auto" }}
@@ -643,7 +643,7 @@ function ProductChecklist({
                       exit={{ opacity: 0, height: 0, pointerEvents: "none" }}
                       transition={{ duration: 0.3 }}
                       className={`overflow-hidden rounded-2xl transition-shadow duration-500 ${
-                        highlightId === a.recipe_id
+                        highlightId === a.assignment_id
                           ? "ring-2 ring-success ring-offset-4 ring-offset-background"
                           : ""
                       }`}
