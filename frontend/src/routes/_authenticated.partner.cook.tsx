@@ -588,7 +588,10 @@ function ProductChecklist({
             return (
               <Fragment key={a.recipe_id}>
                 <button
-                  onClick={() => setActiveId(a.recipe_id)}
+                  onClick={() => {
+                    setActiveId(a.recipe_id);
+                    toast.message("Please upload one photo and submit it for review.");
+                  }}
                   className={`flex w-full items-center gap-3 rounded-xl border p-3 text-left transition ${
                     isActive
                       ? "border-success/50 bg-success/5"
