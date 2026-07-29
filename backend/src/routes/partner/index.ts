@@ -738,12 +738,20 @@ partnerRoutes.post('/courses/:courseId/cook-drafts/:assignmentId/upload', async 
     if (!assignment) { res.status(404).json({ error: 'Assignment not found' }); return; }
 
     const existing = await prisma.lpProductUploadDraft.findUnique({ where: { assignmentId } });
-    const files = [...((existing?.files as Array<{ path: string }>) ?? []), { path: filePath }];
+    // A draft still marked 'submitted' here means this upload is the start
+    // of a fresh round after a redo (the only time the UI allows uploading
+    // again post-submit) — start this round's files clean instead of
+    // appending onto the old, already-reviewed photo(s), so only the new
+    // upload(s) reach admin review, not the redo'd one alongside them.
+    const priorFiles = existing?.status === 'submitted'
+      ? []
+      : ((existing?.files as Array<{ path: string }>) ?? []);
+    const files = [...priorFiles, { path: filePath }];
 
     const draft = await prisma.lpProductUploadDraft.upsert({
       where:  { assignmentId },
       create: { userId, courseId, assignmentId, files },
-      update: { files },
+      update: { files, status: 'pending', submittedAt: null },
     });
     res.status(201).json({ id: draft.id, status: draft.status, files: draft.files });
   } catch (e) { next(e); }
