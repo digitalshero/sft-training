@@ -69,15 +69,19 @@ type ProductFile = {
   remark?: string | null;
 };
 
-type ProductRow = {
-  assignment_id: string;
-  cuisine_name: string;
-  product_name: string;
-  files_signed: ProductFile[];
+type ProductRoundRow = {
   submission_id: string;
   submitted_at: string;
   reviewed_at: string | null;
   feedback?: string | null;
+  files_signed: ProductFile[];
+};
+
+type ProductRow = {
+  assignment_id: string;
+  cuisine_name: string;
+  product_name: string;
+  rounds: ProductRoundRow[]; // newest round first
 };
 
 type PartnerTimelineData = {
@@ -379,11 +383,27 @@ function fileKey(assignmentId: string, path: string) {
   return `${assignmentId}::${path}`;
 }
 
-// Renders every assigned product's latest submission exactly once: the
-// single in-flight (unreviewed) round — if any — as one editable card, and
-// every already-reviewed product as a read-only summary. There is at most
-// one unreviewed round per partner+course at a time, so all "pending"
-// products below always share one submission_id.
+type PendingProductEntry = {
+  assignment_id: string;
+  cuisine_name: string;
+  product_name: string;
+  round: ProductRoundRow;
+};
+
+type DecidedProductEntry = {
+  assignment_id: string;
+  cuisine_name: string;
+  product_name: string;
+  reviewedRounds: ProductRoundRow[]; // oldest first, for a readable history
+};
+
+// Renders every assigned product's in-flight (unreviewed) round — if any —
+// as one editable card, and every already-reviewed round as its own
+// read-only history entry, so a product that went through a redo cycle
+// shows both its earlier Redo round and its later Approved round, not just
+// the latest outcome. There is at most one unreviewed round per
+// partner+course at a time, so all "pending" entries below always share
+// one submission_id.
 function ProductReviewPanel({
   products,
   partnerName,
@@ -397,8 +417,25 @@ function ProductReviewPanel({
   courseTitle: string;
   inviteId: string;
 }) {
-  const pending = products.filter((p) => !p.reviewed_at);
-  const decided = products.filter((p) => p.reviewed_at);
+  const pending: PendingProductEntry[] = products
+    .filter((p) => p.rounds[0] && p.rounds[0].reviewed_at === null)
+    .map((p) => ({
+      assignment_id: p.assignment_id,
+      cuisine_name: p.cuisine_name,
+      product_name: p.product_name,
+      round: p.rounds[0],
+    }));
+  const decided: DecidedProductEntry[] = products
+    .map((p) => ({
+      assignment_id: p.assignment_id,
+      cuisine_name: p.cuisine_name,
+      product_name: p.product_name,
+      reviewedRounds: p.rounds
+        .filter((r) => r.reviewed_at !== null)
+        .slice()
+        .reverse(), // oldest first
+    }))
+    .filter((p) => p.reviewedRounds.length > 0);
 
   return (
     <div className="space-y-4">
@@ -412,57 +449,72 @@ function ProductReviewPanel({
         />
       )}
       {decided.length > 0 && (
-        <div className="space-y-2 rounded-md border p-3">
+        <div className="space-y-3 rounded-md border p-3">
           <div className="text-sm font-medium">Reviewed products</div>
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-            {decided.map((p) => {
-              const redo = p.files_signed.some((f) => f.decision === "redo");
-              const remark = p.files_signed.find((f) => f.remark)?.remark;
-              return (
-                <div
-                  key={p.assignment_id}
-                  className="space-y-2 rounded-md border p-2"
-                >
-                  <div className="flex items-center justify-between gap-2">
-                    <div className="min-w-0">
-                      <div className="truncate text-xs text-muted-foreground">
-                        {p.cuisine_name}
-                      </div>
-                      <div className="truncate text-sm font-medium">
-                        {p.product_name}
-                      </div>
-                    </div>
-                    <StatusBadge value={redo ? "redo" : "approved"} />
-                  </div>
-                  <div className="grid grid-cols-2 gap-2">
-                    {p.files_signed.map((f) => (
-                      <a
-                        key={f.path}
-                        href={f.url}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="block aspect-square overflow-hidden rounded bg-muted"
-                      >
-                        <img
-                          src={f.url}
-                          alt={p.product_name}
-                          className="h-full w-full object-cover"
-                        />
-                      </a>
-                    ))}
-                  </div>
-                  {remark && (
-                    <div className="rounded bg-muted/50 p-2 text-xs">
-                      <span className="font-medium">Admin note:</span> {remark}
-                    </div>
-                  )}
-                  <div className="text-xs text-muted-foreground">
-                    Reviewed {fmt(p.reviewed_at)}
-                  </div>
+          {decided.map((p) => (
+            <div
+              key={p.assignment_id}
+              className="space-y-2 rounded-md border p-2"
+            >
+              <div className="min-w-0">
+                <div className="truncate text-xs text-muted-foreground">
+                  {p.cuisine_name}
                 </div>
-              );
-            })}
-          </div>
+                <div className="truncate text-sm font-medium">
+                  {p.product_name}
+                </div>
+              </div>
+              <div className="space-y-2">
+                {p.reviewedRounds.map((round, idx) => {
+                  const redo = round.files_signed.some(
+                    (f) => f.decision === "redo",
+                  );
+                  const remark = round.files_signed.find(
+                    (f) => f.remark,
+                  )?.remark;
+                  return (
+                    <div
+                      key={round.submission_id}
+                      className="space-y-2 rounded-md border border-dashed p-2"
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-xs font-medium text-muted-foreground">
+                          Round {idx + 1}
+                        </span>
+                        <StatusBadge value={redo ? "redo" : "approved"} />
+                      </div>
+                      <div className="grid grid-cols-2 gap-2">
+                        {round.files_signed.map((f) => (
+                          <a
+                            key={f.path}
+                            href={f.url}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="block aspect-square overflow-hidden rounded bg-muted"
+                          >
+                            <img
+                              src={f.url}
+                              alt={p.product_name}
+                              className="h-full w-full object-cover"
+                            />
+                          </a>
+                        ))}
+                      </div>
+                      {remark && (
+                        <div className="rounded bg-muted/50 p-2 text-xs">
+                          <span className="font-medium">Admin note:</span>{" "}
+                          {remark}
+                        </div>
+                      )}
+                      <div className="text-xs text-muted-foreground">
+                        Reviewed {fmt(round.reviewed_at)}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          ))}
         </div>
       )}
     </div>
@@ -476,7 +528,7 @@ function PendingReviewCard({
   courseTitle,
   inviteId,
 }: {
-  products: ProductRow[];
+  products: PendingProductEntry[];
   partnerName: string;
   partnerEmail: string;
   courseTitle: string;
@@ -484,18 +536,18 @@ function PendingReviewCard({
 }) {
   const qc = useQueryClient();
   const fnSave = reviewProductSubmissionPerFile;
-  const submissionId = products[0].submission_id;
-  const submittedAt = products[0].submitted_at;
+  const submissionId = products[0].round.submission_id;
+  const submittedAt = products[0].round.submitted_at;
 
   const [decisions, setDecisions] = useState<
     Record<string, { decision?: "approved" | "redo"; remark?: string }>
   >({});
   const [feedback, setFeedback] = useState<string>(
-    products[0].feedback ?? "",
+    products[0].round.feedback ?? "",
   );
 
   const allFileKeys = products.flatMap((p) =>
-    p.files_signed.map((f) => fileKey(p.assignment_id, f.path)),
+    p.round.files_signed.map((f) => fileKey(p.assignment_id, f.path)),
   );
   const allDecided = allFileKeys.every(
     (k) =>
@@ -518,7 +570,7 @@ function PendingReviewCard({
         decision: anyRedo ? "redo" : "approved",
         feedback: feedback || undefined,
         files: products.flatMap((p) =>
-          p.files_signed.map((f) => {
+          p.round.files_signed.map((f) => {
             const key = fileKey(p.assignment_id, f.path);
             return {
               assignment_id: p.assignment_id,
@@ -549,7 +601,7 @@ function PendingReviewCard({
 
   function composeRedoMailto() {
     const rejected = products.flatMap((p) =>
-      p.files_signed
+      p.round.files_signed
         .map((f) => ({
           ...f,
           product_name: p.product_name,
@@ -598,7 +650,7 @@ function PendingReviewCard({
 
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
         {products.flatMap((p) =>
-          p.files_signed.map((f) => {
+          p.round.files_signed.map((f) => {
             const key = fileKey(p.assignment_id, f.path);
             const decision = decisions[key]?.decision;
             const remark = decisions[key]?.remark ?? "";

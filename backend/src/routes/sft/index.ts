@@ -831,21 +831,19 @@ sftRoutes.get('/invites/:id/events', requireInviteCertifyOrReview, async (req, r
       ? assignments.reduce((earliest, a) => (a.createdAt < earliest ? a.createdAt : earliest), assignments[0].createdAt)
       : null;
 
-    // Resolve, per assigned product, only its most recent uploaded file(s)
-    // across every review round — same assignment-id-first/label-fallback
-    // matching used on the partner side, walked newest round first so a
-    // product's superseded (redo'd, since re-uploaded) files never surface
-    // alongside its current one. Legacy files that share a label within the
-    // same round are the same product's successive re-uploads (not distinct
-    // photos), so only the most recently appended one per label is kept;
-    // files sharing an assignment_id are genuine multiple photos and are
-    // all kept together.
+    // Resolve, per assigned product, every round that actually touched it —
+    // same assignment-id-first/label-fallback matching used on the partner
+    // side — newest round first, so the admin can see its full redo→approve
+    // history, not just the latest outcome. Legacy files that share a label
+    // within the same round are the same product's successive re-uploads
+    // (not distinct photos), so only the most recently appended one per
+    // label is kept; files sharing an assignment_id are genuine multiple
+    // photos and are all kept together.
     type SubFile = { assignment_id?: string; label?: string | null; path: string; decision?: string | null; remark?: string | null };
     type Round = (typeof submissionsRaw)[number];
-    const filesByAssignmentId = new Map<string, SubFile[]>();
-    const roundByAssignmentId = new Map<string, Round>();
-    const filesByLabel = new Map<string, SubFile[]>();
-    const roundByLabel = new Map<string, Round>();
+    type RoundFiles = { files: SubFile[]; round: Round };
+    const roundsByAssignmentId = new Map<string, RoundFiles[]>();
+    const roundsByLabel = new Map<string, RoundFiles[]>();
     for (const s of submissionsRaw) {
       const files = (Array.isArray(s.files) ? s.files : []) as SubFile[];
       const byIdThisRound = new Map<string, SubFile[]>();
@@ -859,10 +857,14 @@ sftRoutes.get('/invites/:id/events', requireInviteCertifyOrReview, async (req, r
         }
       }
       for (const [id, fs] of byIdThisRound) {
-        if (!filesByAssignmentId.has(id)) { filesByAssignmentId.set(id, fs); roundByAssignmentId.set(id, s); }
+        const arr = roundsByAssignmentId.get(id) ?? [];
+        arr.push({ files: fs, round: s });
+        roundsByAssignmentId.set(id, arr);
       }
       for (const [label, f] of byLabelThisRound) {
-        if (!filesByLabel.has(label)) { filesByLabel.set(label, [f]); roundByLabel.set(label, s); }
+        const arr = roundsByLabel.get(label) ?? [];
+        arr.push({ files: [f], round: s });
+        roundsByLabel.set(label, arr);
       }
     }
 
@@ -872,40 +874,37 @@ sftRoutes.get('/invites/:id/events', requireInviteCertifyOrReview, async (req, r
         const cuisineId = recipe?.cuisineId ?? a.cuisineId;
         const cuisine = cuisineMap.get(cuisineId ?? '');
         const label = `${cuisine?.name ?? ''} — ${recipe?.foodName ?? ''}`.trim();
-        const matchedById = filesByAssignmentId.has(a.id);
-        const files = filesByAssignmentId.get(a.id) ?? filesByLabel.get(label) ?? [];
-        const round = matchedById ? roundByAssignmentId.get(a.id) : roundByLabel.get(label);
-        if (!files.length || !round) return null;
+        const rounds = roundsByAssignmentId.get(a.id) ?? roundsByLabel.get(label) ?? [];
+        if (!rounds.length) return null;
         return {
           assignment_id: a.id,
           cuisine_name: cuisine?.name ?? '',
           product_name: recipe?.foodName ?? '',
-          files, round,
+          rounds, // already newest-first, since submissionsRaw was ordered submittedAt desc
         };
       })
       .filter((r): r is NonNullable<typeof r> => r !== null);
 
-    const allPaths = productRows.flatMap(r => r.files.map(f => f.path));
+    const allPaths = productRows.flatMap(r => r.rounds.flatMap(rd => rd.files.map(f => f.path)));
     const allUrls = await signFilePaths('sft-practice', allPaths);
     let urlCursor = 0;
-    const products = productRows.map(r => {
-      const files_signed = r.files.map(f => ({
-        path: f.path,
-        url: allUrls[urlCursor++] ?? '',
-        decision: f.decision ?? null,
-        remark: f.remark ?? null,
-      }));
-      return {
-        assignment_id: r.assignment_id,
-        cuisine_name: r.cuisine_name,
-        product_name: r.product_name,
-        files_signed,
-        submission_id: r.round.id,
-        submitted_at: r.round.submittedAt,
-        reviewed_at: r.round.reviewedAt,
-        feedback: r.round.feedback,
-      };
-    });
+    const products = productRows.map(r => ({
+      assignment_id: r.assignment_id,
+      cuisine_name: r.cuisine_name,
+      product_name: r.product_name,
+      rounds: r.rounds.map(rd => ({
+        submission_id: rd.round.id,
+        submitted_at: rd.round.submittedAt,
+        reviewed_at: rd.round.reviewedAt,
+        feedback: rd.round.feedback,
+        files_signed: rd.files.map(f => ({
+          path: f.path,
+          url: allUrls[urlCursor++] ?? '',
+          decision: f.decision ?? null,
+          remark: f.remark ?? null,
+        })),
+      })),
+    }));
 
     const visit = invite.userId
       ? await prisma.lpPhysicalVisit.findFirst({
