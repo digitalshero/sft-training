@@ -844,12 +844,13 @@ model LpSampleImageGuide {
 }
 
 model LpProductAssignment {
-  id        String   @id @default(uuid())
-  userId    String   @map("user_id")
-  courseId  String   @map("course_id")
-  cuisineId String   @map("cuisine_id")
-  recipeId  String   @map("recipe_id")
-  createdAt DateTime @default(now()) @map("created_at")
+  id        String    @id @default(uuid())
+  userId    String    @map("user_id")
+  courseId  String    @map("course_id")
+  cuisineId String    @map("cuisine_id")
+  recipeId  String    @map("recipe_id")
+  createdAt DateTime  @default(now()) @map("created_at")
+  removedAt DateTime? @map("removed_at")
 
   @@unique([userId, courseId, cuisineId, recipeId])
   @@index([userId, courseId])

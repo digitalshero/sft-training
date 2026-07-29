@@ -5,7 +5,6 @@ import { Fragment, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { motion, AnimatePresence } from "framer-motion";
 import confetti from "canvas-confetti";
-import api from "@/lib/api/client";
 import { StageShell } from "@/components/partner/stage-shell";
 import {
   CelebrationDialog,
@@ -267,11 +266,11 @@ function CuisineCookView({
   const maxCuisines = cuisinesQ.data?.max_cuisines ?? null;
   const chosenCuisineIds = new Set(assignments.map((a) => a.cuisine_id));
   const atLimit = maxCuisines != null && chosenCuisineIds.size >= maxCuisines;
-  const canRemove =
-    !isCertified &&
-    assignments.every(
-      (a) => a.status === "not_uploaded" && a.draft_status === "none",
-    );
+  // Removal keeps all uploaded photos/submissions/reviews as history and can
+  // be undone by choosing the cuisine again later, so it no longer needs to
+  // be blocked once a product has been uploaded — only certified partners
+  // are locked out entirely.
+  const canRemove = !isCertified;
 
   return (
     <div className="space-y-5">
@@ -283,7 +282,11 @@ function CuisineCookView({
         canRemove={canRemove}
         pending={choose.isPending || remove.isPending || isCertified}
         onChoose={(id) => choose.mutate(id)}
-        onRemove={(id) => remove.mutate(id)}
+        onRemove={(id) => {
+          if (confirm("Remove this cuisine? You can add it back later — your photos and reviews are kept.")) {
+            remove.mutate(id);
+          }
+        }}
       />
       {assignments.length > 0 && (
         <ProductChecklist
@@ -716,75 +719,6 @@ function ProductChecklist({
   );
 }
 
-// ── Client-side image quality check (blur + brightness) ──────────────────────
-async function checkImageQuality(
-  file: File,
-): Promise<{ valid: boolean; reason: string }> {
-  return new Promise((resolve) => {
-    const img = new Image();
-    const url = URL.createObjectURL(file);
-    img.onload = () => {
-      try {
-        const SIZE = 200;
-        const canvas = document.createElement("canvas");
-        canvas.width = SIZE;
-        canvas.height = SIZE;
-        const ctx = canvas.getContext("2d")!;
-        ctx.drawImage(img, 0, 0, SIZE, SIZE);
-        const { data } = ctx.getImageData(0, 0, SIZE, SIZE);
-
-        const gray: number[] = [];
-        let brightness = 0;
-        for (let i = 0; i < data.length; i += 4) {
-          const g = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
-          gray.push(g);
-          brightness += g;
-        }
-        brightness /= gray.length;
-
-        if (brightness < 25) {
-          resolve({ valid: false, reason: "Photo is too dark. Move to a well-lit area and try again." });
-          return;
-        }
-        if (brightness > 245) {
-          resolve({ valid: false, reason: "Photo is overexposed. Avoid direct flash or harsh light directly above the dish." });
-          return;
-        }
-
-        // Laplacian variance — measures sharpness
-        let lapSum = 0;
-        let count = 0;
-        for (let y = 1; y < SIZE - 1; y++) {
-          for (let x = 1; x < SIZE - 1; x++) {
-            const idx = y * SIZE + x;
-            const lap = Math.abs(
-              -4 * gray[idx] + gray[idx - 1] + gray[idx + 1] + gray[idx - SIZE] + gray[idx + SIZE],
-            );
-            lapSum += lap;
-            count++;
-          }
-        }
-        const sharpness = lapSum / count;
-        if (sharpness < 6) {
-          resolve({ valid: false, reason: "Photo is blurry. Hold your phone steady and make sure the dish is in focus." });
-          return;
-        }
-
-        resolve({ valid: true, reason: "" });
-      } catch {
-        resolve({ valid: true, reason: "" }); // Canvas error — don't block
-      } finally {
-        URL.revokeObjectURL(url);
-      }
-    };
-    img.onerror = () => {
-      URL.revokeObjectURL(url);
-      resolve({ valid: false, reason: "Could not read the image file." });
-    };
-    img.src = url;
-  });
-}
-
 function UploadZone({
   active,
   uploading: persisting,
@@ -803,7 +737,6 @@ function UploadZone({
   onSubmit: () => void;
 }) {
   const [uploading, setUploading] = useState(false);
-  const [validating, setValidating] = useState(false);
 
   const ALLOWED_TYPES = ["image/jpeg", "image/jpg", "image/png"];
   const ALLOWED_EXTENSIONS = ["jpg", "jpeg", "png"];
@@ -827,46 +760,16 @@ function UploadZone({
       return;
     }
 
-    // Step 1: client-side blur + brightness check
-    const quality = await checkImageQuality(file);
-    if (!quality.valid) {
-      toast.error(quality.reason, { duration: 6000 });
-      return;
-    }
-
     setUploading(true);
-    let uploadedPath: string | null = null;
     try {
       const path = `partner/${crypto.randomUUID()}.${ext}`;
       const uploadErr = await uploadToStorage("sft-practice", path, file);
       if (uploadErr) throw uploadErr;
-      uploadedPath = path;
-
-      // Step 2: backend AI angle + quality check
-      setUploading(false);
-      setValidating(true);
-      let aiValid = true;
-      let aiReason = "";
-      try {
-        const aiRes = await api.post("/partner/validate-cook-photo", { path });
-        aiValid = aiRes.data?.valid !== false;
-        aiReason = aiRes.data?.reason ?? "";
-      } catch {
-        // AI check unavailable — allow upload
-      }
-
-      if (!aiValid) {
-        toast.error(aiReason || "Photo does not meet requirements. Please retake.", { duration: 7000 });
-        return; // uploaded file stays in storage but is never committed — cleaned up by maintenance
-      }
-
       onUpload(path);
     } catch (e) {
       toast.error((e as Error).message);
     } finally {
       setUploading(false);
-      setValidating(false);
-      void uploadedPath; // used above
     }
   }
 
@@ -959,7 +862,7 @@ function UploadZone({
               ))}
               <label
                 className={`grid aspect-4/3 cursor-pointer place-items-center rounded-xl border border-dashed border-success/40 bg-success/5 text-center transition hover:bg-success/10 ${
-                  uploading || validating || persisting
+                  uploading || persisting
                     ? "pointer-events-none opacity-60"
                     : ""
                 }`}
@@ -968,7 +871,7 @@ function UploadZone({
                   type="file"
                   accept="image/*"
                   className="hidden"
-                  disabled={uploading || validating || persisting}
+                  disabled={uploading || persisting}
                   onChange={(e) => {
                     const file = e.target.files?.[0];
                     // Reset so re-picking the same filename (common when
@@ -977,7 +880,7 @@ function UploadZone({
                     if (file) pick(file);
                   }}
                 />
-                {uploading || validating || persisting ? (
+                {uploading || persisting ? (
                   <Loader2 className="h-6 w-6 animate-spin text-success" />
                 ) : (
                   <>
@@ -989,11 +892,6 @@ function UploadZone({
                 )}
               </label>
             </div>
-            {validating && (
-              <p className="text-center text-xs text-success">
-                Checking image clarity &amp; format…
-              </p>
-            )}
             <p className="text-center text-xs text-muted-foreground">
               JPG, PNG up to {MAX_SIZE_MB}MB each — upload as many as you need.
             </p>

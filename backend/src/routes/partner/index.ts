@@ -1,6 +1,4 @@
 import { Router, Request, Response, NextFunction } from 'express';
-import { readFile } from 'fs/promises';
-import { join } from 'path';
 import type { Prisma } from '@prisma/client';
 import { prisma } from '../../lib/prisma';
 import { requireAuth, AuthRequest } from '../../middleware/auth';
@@ -104,7 +102,7 @@ partnerRoutes.get('/dashboard', async (req: Request, res: Response, next: NextFu
       )) : [],
       // Cuisine/product-assignment model — needed to compute a correct
       // "all assigned products approved" submission_status per course below.
-      courseIds.length ? prisma.lpProductAssignment.findMany({ where: { userId, courseId: { in: courseIds } } }) : [],
+      courseIds.length ? prisma.lpProductAssignment.findMany({ where: { userId, courseId: { in: courseIds }, removedAt: null } }) : [],
       courseIds.length ? prisma.lpRecipe.findMany({ where: { courseId: { in: courseIds } } }) : [],
       courseIds.length ? prisma.lpCuisine.findMany({ where: { courseId: { in: courseIds } } }) : [],
     ]);
@@ -465,15 +463,26 @@ async function chooseCuisineForCourse(
   const lockKey = `choose-cuisine:${userId}:${courseId}:${cuisineId}`;
   await db.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${lockKey})::bigint)`;
 
-  const existing = await db.lpProductAssignment.findFirst({ where: { userId, courseId, cuisineId } });
-  if (existing) return { ok: true, already: true };
+  const existingRows = await db.lpProductAssignment.findMany({ where: { userId, courseId, cuisineId } });
+  if (existingRows.some(a => a.removedAt === null)) return { ok: true, already: true };
 
   const [course, chosenCuisineIds] = await Promise.all([
     db.lpCourse.findUniqueOrThrow({ where: { id: courseId }, select: { maxCuisines: true } }),
-    db.lpProductAssignment.findMany({ where: { userId, courseId }, select: { cuisineId: true }, distinct: ['cuisineId'] }),
+    db.lpProductAssignment.findMany({ where: { userId, courseId, removedAt: null }, select: { cuisineId: true }, distinct: ['cuisineId'] }),
   ]);
   if (course.maxCuisines != null && chosenCuisineIds.length >= course.maxCuisines) {
     return { ok: false, status: 400, error: `You can select up to ${course.maxCuisines} cuisine${course.maxCuisines === 1 ? '' : 's'} for this course.` };
+  }
+
+  if (existingRows.length) {
+    // Previously chosen, then removed — reactivate the same rows (same ids)
+    // instead of re-randomizing, so drafts/submissions that key off the
+    // assignment id reconnect automatically, and no duplicate rows appear.
+    await db.lpProductAssignment.updateMany({
+      where: { userId, courseId, cuisineId, removedAt: { not: null } },
+      data:  { removedAt: null },
+    });
+    return { ok: true, assigned: existingRows.length };
   }
 
   const cuisine = await db.lpCuisine.findUniqueOrThrow({ where: { id: cuisineId } });
@@ -517,7 +526,7 @@ partnerRoutes.get('/courses/:courseId/my-cook-assignments', async (req: Request,
     const userId   = (req as AuthRequest).user.id;
     const courseId = req.params.courseId;
     const assignments = await prisma.lpProductAssignment.findMany({
-      where: { userId, courseId },
+      where: { userId, courseId, removedAt: null },
     });
     if (!assignments.length) { res.json([]); return; }
 
@@ -643,10 +652,7 @@ partnerRoutes.post('/courses/:courseId/cuisines/:cuisineId/remove', async (req: 
     const courseId  = req.params.courseId;
     const cuisineId = req.params.cuisineId;
 
-    const subs = await prisma.lpProductSubmission.findFirst({ where: { userId, courseId } });
-    if (subs) { res.status(400).json({ error: 'Cannot change cuisines after uploading' }); return; }
-
-    const assignments = await prisma.lpProductAssignment.findMany({ where: { userId, courseId } });
+    const assignments = await prisma.lpProductAssignment.findMany({ where: { userId, courseId, removedAt: null } });
     const recipes = await prisma.lpRecipe.findMany({
       where:  { id: { in: assignments.map(a => a.recipeId) } },
       select: { id: true, cuisineId: true },
@@ -655,16 +661,16 @@ partnerRoutes.post('/courses/:courseId/cuisines/:cuisineId/remove', async (req: 
     // a recipe's own cuisineId is the source of truth, since the assignment's stored
     // cuisineId can go stale if the cuisine it was picked under was later deleted/recreated.
     const recipeCuisineMap = new Map(recipes.map(r => [r.id, r.cuisineId]));
-    const toDelete = assignments
+    const toRemove = assignments
       .filter(a => (recipeCuisineMap.get(a.recipeId) ?? a.cuisineId) === cuisineId)
       .map(a => a.id);
-    if (!toDelete.length) { res.status(404).json({ error: 'No products assigned for this cuisine' }); return; }
+    if (!toRemove.length) { res.status(404).json({ error: 'No products assigned for this cuisine' }); return; }
 
-    const draftExists = await prisma.lpProductUploadDraft.findFirst({ where: { assignmentId: { in: toDelete } } });
-    if (draftExists) { res.status(400).json({ error: 'Cannot change cuisines after uploading' }); return; }
-
-    await prisma.lpProductAssignment.deleteMany({ where: { id: { in: toDelete } } });
-    res.json({ ok: true, removed: toDelete.length });
+    // Soft delete — keeps uploaded photos, submissions, and admin review
+    // history intact so re-adding this cuisine later restores it exactly,
+    // instead of creating duplicate products/images/submissions.
+    await prisma.lpProductAssignment.updateMany({ where: { id: { in: toRemove } }, data: { removedAt: new Date() } });
+    res.json({ ok: true, removed: toRemove.length });
   } catch (e) { next(e); }
 });
 
@@ -699,7 +705,7 @@ partnerRoutes.post('/courses/:courseId/submit-cook', async (req: Request, res: R
     }
     const assignmentIds = [...new Set(files.map(f => f.assignment_id!))];
     const ownedCount = await prisma.lpProductAssignment.count({
-      where: { id: { in: assignmentIds }, userId, courseId },
+      where: { id: { in: assignmentIds }, userId, courseId, removedAt: null },
     });
     if (ownedCount !== assignmentIds.length) {
       res.status(400).json({ error: 'One or more photos reference a product not assigned to you for this course' });
@@ -728,7 +734,7 @@ partnerRoutes.post('/courses/:courseId/cook-drafts/:assignmentId/upload', async 
     const { path: filePath } = req.body as { path?: string };
     if (!filePath) { res.status(400).json({ error: 'path required' }); return; }
 
-    const assignment = await prisma.lpProductAssignment.findFirst({ where: { id: assignmentId, userId, courseId } });
+    const assignment = await prisma.lpProductAssignment.findFirst({ where: { id: assignmentId, userId, courseId, removedAt: null } });
     if (!assignment) { res.status(404).json({ error: 'Assignment not found' }); return; }
 
     const existing = await prisma.lpProductUploadDraft.findUnique({ where: { assignmentId } });
@@ -751,7 +757,7 @@ partnerRoutes.post('/courses/:courseId/cook-drafts/:assignmentId/remove-image', 
     const { path: filePath } = req.body as { path?: string };
     if (!filePath) { res.status(400).json({ error: 'path required' }); return; }
 
-    const assignment = await prisma.lpProductAssignment.findFirst({ where: { id: assignmentId, userId, courseId } });
+    const assignment = await prisma.lpProductAssignment.findFirst({ where: { id: assignmentId, userId, courseId, removedAt: null } });
     if (!assignment) { res.status(404).json({ error: 'Assignment not found' }); return; }
 
     const draft = await prisma.lpProductUploadDraft.findUnique({ where: { assignmentId } });
@@ -770,7 +776,7 @@ partnerRoutes.post('/courses/:courseId/cook-drafts/:assignmentId/submit', async 
     const courseId = req.params.courseId;
     const { assignmentId } = req.params;
 
-    const assignment = await prisma.lpProductAssignment.findFirst({ where: { id: assignmentId, userId, courseId } });
+    const assignment = await prisma.lpProductAssignment.findFirst({ where: { id: assignmentId, userId, courseId, removedAt: null } });
     if (!assignment) { res.status(404).json({ error: 'Assignment not found' }); return; }
 
     const draft = await prisma.lpProductUploadDraft.findUnique({ where: { assignmentId } });
@@ -799,79 +805,6 @@ partnerRoutes.post('/courses/:courseId/cook-drafts/:assignmentId/submit', async 
 
     res.json({ id: updated.id, status: updated.status, submission_id: sub.id });
   } catch (e) { next(e); }
-});
-
-// ── Cook photo quality validation ────────────────────────────────────────────
-// Uses OpenAI GPT-4o-mini vision to verify image clarity and format.
-// Falls back to { valid: true } if OPENAI_API_KEY is not configured.
-
-partnerRoutes.post('/validate-cook-photo', async (req: Request, res: Response, next: NextFunction) => {
-  try {
-    const { path: storagePath } = req.body as { path?: string };
-    if (!storagePath) { res.status(400).json({ error: 'path required' }); return; }
-
-    const apiKey = process.env.OPENAI_API_KEY;
-    if (!apiKey) {
-      res.json({ valid: true, reason: '' });
-      return;
-    }
-
-    // Build image data: base64 in local mode, signed URL in S3 mode.
-    let imageUrl: string;
-    const storageMode = process.env.STORAGE_MODE || 'local';
-    if (storageMode === 'local') {
-      const filePath = join(process.env.LOCAL_UPLOAD_DIR || './uploads', 'sft-practice', storagePath);
-      const buf = await readFile(filePath);
-      const ext = storagePath.split('.').pop()?.toLowerCase() ?? 'jpg';
-      const mime = ext === 'png' ? 'image/png' : 'image/jpeg';
-      imageUrl = `data:${mime};base64,${buf.toString('base64')}`;
-    } else {
-      imageUrl = await createSignedUrl('sft-practice', storagePath, 120);
-    }
-
-    const oaiRes = await fetch('https://api.openai.com/v1/chat/completions', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
-      body: JSON.stringify({
-        model: 'gpt-4o-mini',
-        messages: [{
-          role: 'user',
-          content: [
-            {
-              type: 'text',
-              text: `You are checking a food product photo for a cooking certification program.
-The photo must meet ALL of these requirements:
-1. Clarity: the dish is sharp, in focus, and well-lit — not blurry, too dark, or overexposed.
-2. Format: the photo is a genuine, valid image of a plated food dish (not blank, corrupted, or an unrelated picture).
-
-Respond with JSON only — no extra text:
-{"valid": true, "reason": ""} if it passes all checks.
-{"valid": false, "reason": "One sentence explaining what to fix."} if it fails any check.`,
-            },
-            { type: 'image_url', image_url: { url: imageUrl, detail: 'low' } },
-          ],
-        }],
-        max_tokens: 80,
-        response_format: { type: 'json_object' },
-      }),
-    });
-
-    if (!oaiRes.ok) {
-      console.warn('[validate-cook-photo] OpenAI error', oaiRes.status);
-      res.json({ valid: true, reason: '' });
-      return;
-    }
-
-    const oaiData = await oaiRes.json() as { choices?: Array<{ message?: { content?: string } }> };
-    const content = oaiData.choices?.[0]?.message?.content ?? '{}';
-    let result: { valid?: boolean; reason?: string } = {};
-    try { result = JSON.parse(content); } catch { /* keep empty */ }
-
-    res.json({ valid: result.valid !== false, reason: result.reason ?? '' });
-  } catch (e) {
-    console.error('[validate-cook-photo]', e);
-    res.json({ valid: true, reason: '' }); // Don't block on AI failure
-  }
 });
 
 // ── Physical Visit (partner view) ─────────────────────────────────────────────

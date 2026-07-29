@@ -38,8 +38,10 @@ import {
   assignVisitor,
   type PhysicalVisitRow,
 } from "@/lib/sft/physical-visit.functions";
-import { getPartnerSelectedCuisines } from "@/lib/learning/cuisines.functions";
-import { listRecipesByCuisine } from "@/lib/learning/recipes.functions";
+import {
+  getPartnerSelectedCuisines,
+  getPartnerCuisineApprovedProducts,
+} from "@/lib/learning/cuisines.functions";
 
 export function AssignVisitorForm({
   visit,
@@ -87,8 +89,6 @@ export function AssignVisitorForm({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [visit.id, isReschedule]);
 
-  const fnListRecipes = listRecipesByCuisine;
-
   const cuisinesQ = useQuery({
     queryKey: ["assign-visitor-cuisines", visit.user_id, visit.course_id],
     queryFn: () =>
@@ -102,13 +102,14 @@ export function AssignVisitorForm({
   const partnerHasNoCuisines = !cuisinesQ.isLoading && partnerCuisines.length === 0;
 
   const recipesQ = useQuery({
-    queryKey: ["assign-visitor-recipes", form.cuisine_id],
+    queryKey: ["assign-visitor-recipes", visit.user_id, visit.course_id, form.cuisine_id],
     queryFn: () =>
-      fnListRecipes({
+      getPartnerCuisineApprovedProducts({
+        user_id: visit.user_id,
         course_id: visit.course_id,
         cuisine_id: form.cuisine_id,
       }),
-    enabled: !!form.cuisine_id && !!visit.course_id,
+    enabled: !!form.cuisine_id && !!visit.course_id && !!visit.user_id,
   });
 
   const recipeOptions = useMemo(() => recipesQ.data ?? [], [recipesQ.data]);

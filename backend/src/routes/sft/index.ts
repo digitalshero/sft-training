@@ -985,7 +985,7 @@ sftRoutes.get('/review', requireInviteCertifyOrReview, async (req, res, next) =>
       // "Yet to Start" existence check + exported "Physical Visit status" column.
       userIds.length ? prisma.lpPhysicalVisit.findMany({ where: { userId: { in: userIds }, courseId: { in: courseIds } }, select: { userId: true, courseId: true, status: true, createdAt: true } }) : [],
       // Per-product counts (submitted/approved/redo/pending) for the export sheet.
-      userIds.length ? prisma.lpProductAssignment.findMany({ where: { userId: { in: userIds }, courseId: { in: courseIds } } }) : [],
+      userIds.length ? prisma.lpProductAssignment.findMany({ where: { userId: { in: userIds }, courseId: { in: courseIds }, removedAt: null } }) : [],
       courseIds.length ? prisma.lpRecipe.findMany({ where: { courseId: { in: courseIds } } }) : [],
       courseIds.length ? prisma.lpCuisine.findMany({ where: { courseId: { in: courseIds } } }) : [],
     ]);
@@ -1262,14 +1262,33 @@ sftRoutes.delete('/certificates/extra/:id', requireInviteCertifyOrReview, async 
 // ─────────────────────────────────────────────────────────────────────────────
 // PARTNER SELECTED CUISINES (for Physical Visit scheduling)
 // ─────────────────────────────────────────────────────────────────────────────
-// The partner's own Prepare & Cook cuisine choice (LpProductAssignment) is the
-// single source of truth here — the physical-visit cuisine dropdown must only
-// offer cuisines the partner actually picked, not the full course cuisine list.
+// Assign Visitor must only offer a cuisine the partner picked AND fully
+// completed (every assigned product approved) — the same rule /physical-visits
+// eligibility already enforces below, just evaluated for one partner.
+
+type PvSubFile = { assignment_id?: string; label?: string; decision?: string };
+function resolvePartnerProductStatus(
+  assignmentId: string,
+  label: string,
+  subsForKey: Array<{ files: unknown }>,
+): string {
+  for (const s of subsForKey) {
+    const allFiles = (s.files as PvSubFile[]) ?? [];
+    const files = allFiles.some(f => f.assignment_id === assignmentId)
+      ? allFiles.filter(f => f.assignment_id === assignmentId)
+      : allFiles.filter(f => !f.assignment_id && f.label === label);
+    if (!files.length) continue;
+    if (files.some(f => f.decision === 'redo')) return 'redo';
+    if (files.every(f => f.decision === 'approved')) return 'approved';
+    return 'pending';
+  }
+  return 'not_uploaded';
+}
 
 sftRoutes.get('/partners/:userId/courses/:courseId/selected-cuisines', requirePhysicalVisit, async (req, res, next) => {
   try {
     const { userId, courseId } = req.params;
-    const assignments = await prisma.lpProductAssignment.findMany({ where: { userId, courseId } });
+    const assignments = await prisma.lpProductAssignment.findMany({ where: { userId, courseId, removedAt: null } });
     if (!assignments.length) { res.json({ cuisines: [] }); return; }
 
     // A recipe's own cuisineId is the live source of truth — an assignment's
@@ -1277,8 +1296,8 @@ sftRoutes.get('/partners/:userId/courses/:courseId/selected-cuisines', requirePh
     // later deleted/recreated (same rule /my-cook-assignments already uses).
     const recipes = await prisma.lpRecipe.findMany({
       where: { id: { in: assignments.map(a => a.recipeId) } },
-      select: { cuisineId: true },
     });
+    const recipeMap = new Map(recipes.map(r => [r.id, r] as const));
     const cuisineIds = new Set<string>();
     assignments.forEach(a => cuisineIds.add(a.cuisineId));
     recipes.forEach(r => { if (r.cuisineId) cuisineIds.add(r.cuisineId); });
@@ -1287,12 +1306,59 @@ sftRoutes.get('/partners/:userId/courses/:courseId/selected-cuisines', requirePh
       where: { id: { in: [...cuisineIds] } },
       orderBy: { sortOrder: 'asc' },
     });
-    res.json({
-      cuisines: cuisines.map(c => ({
-        id: c.id, course_id: c.courseId, name: c.name,
-        sort_order: c.sortOrder, show_count: c.showCount, active: c.active,
-      })),
+    const cuisineMap = new Map(cuisines.map(c => [c.id, c] as const));
+
+    const subs = await prisma.lpProductSubmission.findMany({ where: { userId, courseId }, orderBy: { submittedAt: 'desc' } });
+
+    const byCuisine = new Map<string, string[]>();
+    assignments.forEach(a => {
+      const recipe = recipeMap.get(a.recipeId);
+      const cuisineId = recipe?.cuisineId ?? a.cuisineId;
+      const label = `${cuisineMap.get(cuisineId)?.name ?? ''} — ${recipe?.foodName ?? ''}`.trim();
+      const status = resolvePartnerProductStatus(a.id, label, subs);
+      const arr = byCuisine.get(cuisineId) ?? [];
+      arr.push(status);
+      byCuisine.set(cuisineId, arr);
     });
+    const completedCuisineIds = new Set(
+      [...byCuisine.entries()]
+        .filter(([, statuses]) => statuses.length > 0 && statuses.every(s => s === 'approved'))
+        .map(([id]) => id),
+    );
+
+    res.json({
+      cuisines: cuisines
+        .filter(c => completedCuisineIds.has(c.id))
+        .map(c => ({
+          id: c.id, course_id: c.courseId, name: c.name,
+          sort_order: c.sortOrder, show_count: c.showCount, active: c.active,
+        })),
+    });
+  } catch (e) { next(e); }
+});
+
+sftRoutes.get('/partners/:userId/courses/:courseId/cuisines/:cuisineId/approved-products', requirePhysicalVisit, async (req, res, next) => {
+  try {
+    const { userId, courseId, cuisineId } = req.params;
+    const assignments = await prisma.lpProductAssignment.findMany({ where: { userId, courseId, removedAt: null } });
+    const recipes = assignments.length
+      ? await prisma.lpRecipe.findMany({ where: { id: { in: assignments.map(a => a.recipeId) } } })
+      : [];
+    const recipeMap = new Map(recipes.map(r => [r.id, r] as const));
+    const cuisine = await prisma.lpCuisine.findUnique({ where: { id: cuisineId } });
+    const subs = await prisma.lpProductSubmission.findMany({ where: { userId, courseId }, orderBy: { submittedAt: 'desc' } });
+
+    const products = assignments
+      .filter(a => (recipeMap.get(a.recipeId)?.cuisineId ?? a.cuisineId) === cuisineId)
+      .map(a => {
+        const recipe = recipeMap.get(a.recipeId);
+        const label = `${cuisine?.name ?? ''} — ${recipe?.foodName ?? ''}`.trim();
+        return { id: a.recipeId, food_name: recipe?.foodName ?? '', status: resolvePartnerProductStatus(a.id, label, subs) };
+      })
+      .filter(p => p.status === 'approved')
+      .map(({ id, food_name }) => ({ id, food_name }));
+
+    res.json(products);
   } catch (e) { next(e); }
 });
 
@@ -1326,7 +1392,7 @@ sftRoutes.get('/physical-visits', requirePhysicalVisit, async (req, res, next) =
     const completedCuisineByUser = new Map<string, string>();
     if (candidateUserIds.length) {
       const [assignments, allSubsForCandidates] = await Promise.all([
-        prisma.lpProductAssignment.findMany({ where: { userId: { in: candidateUserIds } } }),
+        prisma.lpProductAssignment.findMany({ where: { userId: { in: candidateUserIds }, removedAt: null } }),
         prisma.lpProductSubmission.findMany({
           where: { userId: { in: candidateUserIds } },
           orderBy: { submittedAt: 'desc' },

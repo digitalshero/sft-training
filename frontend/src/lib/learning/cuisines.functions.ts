@@ -30,6 +30,18 @@ export const getPartnerSelectedCuisines = (d: {
   api
     .get(`/sft/partners/${d.user_id}/courses/${d.course_id}/selected-cuisines`)
     .then((r) => r.data);
+/** Admin-facing: a partner's own assigned+approved products for one of
+ *  their completed cuisines — used to scope the Physical Visit scheduling
+ *  form's product checklist to what was actually reviewed, instead of the
+ *  full course recipe catalog. */
+export const getPartnerCuisineApprovedProducts = (d: {
+  user_id: string;
+  course_id: string;
+  cuisine_id: string;
+}): Promise<{ id: string; food_name: string }[]> =>
+  api
+    .get(`/sft/partners/${d.user_id}/courses/${d.course_id}/cuisines/${d.cuisine_id}/approved-products`)
+    .then((r) => r.data);
 export const getMyCookAssignments = (d: { course_id: string }) =>
   api.get(`/partner/courses/${d.course_id}/my-cook-assignments`).then((r) => r.data);
 export const chooseCuisine = (d: { course_id: string; cuisineId: string }) =>
