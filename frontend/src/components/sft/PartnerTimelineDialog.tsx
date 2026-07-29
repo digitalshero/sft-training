@@ -508,7 +508,14 @@ function PendingReviewCard({
     mutationFn: () =>
       fnSave({
         id: submissionId,
-        decision: "approved",
+        // The round-level decision must reflect whether ANY photo in this
+        // batch was sent back for redo — this used to always send
+        // "approved" regardless of per-photo decisions, which fed a stale
+        // status into the submission's round-level LpSubmissionStatus field
+        // (used by the Review Queue's status badge/filter and the
+        // partner's dashboard "needs redo" prompt), even though the
+        // per-photo decisions themselves were always stored correctly.
+        decision: anyRedo ? "redo" : "approved",
         feedback: feedback || undefined,
         files: products.flatMap((p) =>
           p.files_signed.map((f) => {
