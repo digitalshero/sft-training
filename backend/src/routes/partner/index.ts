@@ -503,6 +503,43 @@ async function chooseCuisineForCourse(
   return { ok: true, assigned: picked.length };
 }
 
+// A cuisine's recipe catalog can grow in Course Builder after a partner has
+// already chosen it — nothing previously re-synced an existing partner's
+// assignments to match, so they'd be stuck missing a product forever. This
+// only ever ADDS assignment rows for recipes the partner doesn't already
+// have (active or removed) for this cuisine, up to the cuisine's configured
+// count — it never touches an existing row, so it can't affect a product
+// they've already uploaded to, and the unique constraint plus this
+// function's own "don't have it yet" check means it can never duplicate one.
+async function topUpCuisineAssignments(
+  db: Prisma.TransactionClient,
+  userId: string,
+  courseId: string,
+  cuisineId: string,
+) {
+  const lockKey = `top-up-cuisine:${userId}:${courseId}:${cuisineId}`;
+  await db.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${lockKey})::bigint)`;
+
+  const [cuisine, existing, recipes] = await Promise.all([
+    db.lpCuisine.findUnique({ where: { id: cuisineId } }),
+    db.lpProductAssignment.findMany({ where: { userId, courseId, cuisineId } }),
+    db.lpRecipe.findMany({ where: { cuisineId, active: true }, orderBy: { sortOrder: 'asc' } }),
+  ]);
+  if (!cuisine) return;
+
+  const activeCount = existing.filter(a => a.removedAt === null).length;
+  const cap = cuisine.showCount > 0 ? cuisine.showCount : Infinity;
+  if (activeCount >= cap) return;
+
+  const haveRecipeIds = new Set(existing.map(a => a.recipeId));
+  const missing = recipes.filter(r => !haveRecipeIds.has(r.id)).slice(0, cap - activeCount);
+  if (!missing.length) return;
+
+  await db.lpProductAssignment.createMany({
+    data: missing.map(r => ({ userId, courseId, cuisineId, recipeId: r.id })),
+  });
+}
+
 partnerRoutes.post('/courses/:courseId/choose-cuisine', async (req: Request, res: Response, next: NextFunction) => {
   try {
     const userId   = (req as AuthRequest).user.id;
@@ -525,6 +562,18 @@ partnerRoutes.get('/courses/:courseId/my-cook-assignments', async (req: Request,
   try {
     const userId   = (req as AuthRequest).user.id;
     const courseId = req.params.courseId;
+
+    // Top up any already-chosen cuisine with recipes added to its catalog
+    // since the partner picked it, before reading their product list.
+    const activeCuisineIds = await prisma.lpProductAssignment.findMany({
+      where: { userId, courseId, removedAt: null },
+      select: { cuisineId: true },
+      distinct: ['cuisineId'],
+    });
+    for (const { cuisineId } of activeCuisineIds) {
+      await prisma.$transaction(tx => topUpCuisineAssignments(tx, userId, courseId, cuisineId));
+    }
+
     const assignments = await prisma.lpProductAssignment.findMany({
       where: { userId, courseId, removedAt: null },
     });
