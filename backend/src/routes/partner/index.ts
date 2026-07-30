@@ -532,7 +532,20 @@ async function topUpCuisineAssignments(
   if (activeCount >= cap) return;
 
   const haveRecipeIds = new Set(existing.map(a => a.recipeId));
-  const missing = recipes.filter(r => !haveRecipeIds.has(r.id)).slice(0, cap - activeCount);
+  // A recipe can be deactivated/deleted and recreated under a new id in
+  // Course Builder — same dish to the partner, but a different recipeId.
+  // Comparing by id alone would treat that recreation as a brand-new
+  // product and add a duplicate card for something already assigned, so
+  // also resolve what the partner's existing assignments' recipes are
+  // *named* (even if since deactivated) and skip anything that matches.
+  const existingRecipes = haveRecipeIds.size
+    ? await db.lpRecipe.findMany({ where: { id: { in: [...haveRecipeIds] } }, select: { foodName: true } })
+    : [];
+  const haveFoodNames = new Set(existingRecipes.map(r => r.foodName.trim().toLowerCase()));
+
+  const missing = recipes
+    .filter(r => !haveRecipeIds.has(r.id) && !haveFoodNames.has(r.foodName.trim().toLowerCase()))
+    .slice(0, cap - activeCount);
   if (!missing.length) return;
 
   await db.lpProductAssignment.createMany({
