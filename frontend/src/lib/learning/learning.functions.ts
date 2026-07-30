@@ -436,7 +436,14 @@ export const reviewProductSubmission = (d: {
   decision: string;
   feedback?: string;
   files?: unknown[];
-}) => api.post(`/sft/submissions/${d.id}/review`, d).then((r) => r.data);
+}) =>
+  api
+    .post(`/sft/submissions/${d.id}/review`, d)
+    .then((r) => r.data)
+    .catch((e) => {
+      const message = e?.response?.data?.error;
+      throw message ? new Error(message) : e;
+    });
 export const reviewProductSubmissionPerFile = reviewProductSubmission;
 export const getCourseTeachData = (d: { course_id: string }) =>
   api.get(`/sft/courses/${d.course_id}/teach-data`).then((r) => r.data);

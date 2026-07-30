@@ -1135,17 +1135,54 @@ sftRoutes.get('/review', requireInviteCertifyOrReview, async (req, res, next) =>
 sftRoutes.post('/submissions/:id/review', requireReview, async (req: Request, res: Response, next: NextFunction) => {
   try {
     const reviewerId = (req as AuthRequest).user.id;
-    const { decision, feedback, files } = req.body as { decision: string; feedback?: string; files?: unknown[] };
-    const sub = await prisma.lpProductSubmission.update({
-      where: { id: req.params.id },
-      data: {
-        status:     decision as 'approved' | 'redo' | 'rejected',
-        feedback:   feedback ?? null,
-        reviewerId,
-        reviewedAt: new Date(),
-        ...(files ? { files: files as unknown as Prisma.InputJsonValue } : {}),
-      },
+    const { decision, feedback, files } = req.body as {
+      decision: string; feedback?: string; files?: Array<{ assignment_id?: string; path: string }>;
+    };
+
+    const existing = await prisma.lpProductSubmission.findUniqueOrThrow({
+      where: { id: req.params.id }, select: { userId: true, courseId: true },
     });
+
+    const result = await prisma.$transaction(async (tx) => {
+      // Same lock key as upsertIntoActiveSubmission (the partner submit
+      // path, partner/index.ts) — without this, a partner submitting a new
+      // product into this same round while this save is in flight can
+      // silently clobber whichever write lands last, since both sides
+      // replace the whole files array wholesale rather than patching it.
+      const lockKey = `${existing.userId}:${existing.courseId}`;
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${lockKey})::bigint)`;
+
+      const fresh = await tx.lpProductSubmission.findUniqueOrThrow({ where: { id: req.params.id } });
+      if (fresh.reviewedAt !== null) {
+        return { conflict: 'This round has already been reviewed — refresh and try again.' } as const;
+      }
+
+      if (files) {
+        const freshFiles = (Array.isArray(fresh.files) ? fresh.files : []) as Array<{ assignment_id?: string; path: string }>;
+        const fileKey = (f: { assignment_id?: string; path: string }) => f.assignment_id ?? f.path;
+        const incomingKeys = new Set(files.map(fileKey));
+        const addedSincePageLoad = freshFiles.some(f => !incomingKeys.has(fileKey(f)));
+        if (addedSincePageLoad) {
+          return { conflict: 'The partner submitted another product since you opened this review — refresh and try again so nothing gets missed.' } as const;
+        }
+      }
+
+      const sub = await tx.lpProductSubmission.update({
+        where: { id: req.params.id },
+        data: {
+          status:     decision as 'approved' | 'redo' | 'rejected',
+          feedback:   feedback ?? null,
+          reviewerId,
+          reviewedAt: new Date(),
+          ...(files ? { files: files as unknown as Prisma.InputJsonValue } : {}),
+        },
+      });
+      return { sub } as const;
+    });
+
+    if ('conflict' in result) { res.status(409).json({ error: result.conflict }); return; }
+    const sub = result.sub;
+
     await prisma.lpPartnerEvent.create({
       data: { courseId: sub.courseId, userId: sub.userId, eventType: `submission_${decision}`, payload: { submission_id: sub.id, feedback: feedback ?? null } },
     });
