@@ -59,7 +59,7 @@ async function main() {
     const recipe = recipeMap.get(a.recipeId);
     const foodName = (recipe?.foodName ?? '').trim().toLowerCase();
     if (!foodName) continue; // can't group an unresolvable recipe by name
-    const cuisineId = recipe.cuisineId ?? a.cuisineId;
+    const cuisineId = recipe?.cuisineId ?? a.cuisineId;
     const key = `${a.userId}::${a.courseId}::${cuisineId}::${foodName}`;
     const arr = byKey.get(key) ?? [];
     arr.push(a);

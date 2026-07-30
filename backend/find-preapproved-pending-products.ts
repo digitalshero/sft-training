@@ -28,8 +28,8 @@ async function main() {
 
   const recipeMap = new Map(recipes.map(r => [r.id, r] as const));
   const cuisineMap = new Map(cuisines.map(c => [c.id, c] as const));
-  const inviteByUserCourse = new Map(
-    invites.filter(i => i.userId).map(i => [`${i.userId}::${i.courseId}`, i] as const),
+  const inviteByUserCourse = new Map<string, (typeof invites)[number]>(
+    invites.filter(i => i.userId).map(i => [`${i.userId}::${i.courseId}`, i]),
   );
 
   // Group this partner+course's submissions once, newest first.
