@@ -411,6 +411,7 @@ function PhysicalVisitPage() {
                               <Link
                                 to="/sft-training/physical-visit/assign/$visitId"
                                 params={{ visitId: r.id }}
+                                search={{}}
                               >
                                 Assign Visitor
                               </Link>
@@ -420,6 +421,7 @@ function PhysicalVisitPage() {
                               <Link
                                 to="/sft-training/physical-visit/assign/$visitId"
                                 params={{ visitId: r.id }}
+                                search={{}}
                               >
                                 <RefreshCw className="h-3.5 w-3.5" /> Reschedule
                               </Link>

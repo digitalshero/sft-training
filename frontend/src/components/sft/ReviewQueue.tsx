@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react";
+import { useNavigate } from "@tanstack/react-router";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   listReviewPartners,
@@ -29,74 +30,20 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { Dialog, DialogContent } from "@/components/ui/dialog";
 import { Loader2, Search, Eye, CheckCircle2, Award, FileSpreadsheet, CalendarClock } from "lucide-react";
 import { PartnerTimelineDialog, StatusBadge, fmt } from "./PartnerTimelineDialog";
 import { DeletePartnerRecordButton } from "./DeletePartnerRecordButton";
-import { AssignVisitorForm } from "./AssignVisitorForm";
-import { type PhysicalVisitRow } from "@/lib/sft/physical-visit.functions";
 import { exportXLSX, type ExportColumn } from "@/lib/export";
 
 type ReviewRow = ReviewPartnerRow & { visit_status?: string | null };
 
-// A manual "push to Physical Visit" for a partner the automatic eligibility
-// scan hasn't (yet) picked up — reuses the exact same "eligible-<userId>"
-// convention the Physical Visit page's own auto-detected rows already use,
-// so this creates the visit record through the identical, already-working
-// path. This is a manual escape hatch alongside the automatic flow, not a
-// replacement for it.
-function manualEligibleVisitRow(r: ReviewRow): PhysicalVisitRow {
-  return {
-    id: `eligible-${r.user_id}`,
-    user_id: r.user_id!,
-    course_id: r.course_id,
-    recipe_id: null,
-    submission_id: null,
-    attempt_no: 1,
-    partner_name: r.recipient_name,
-    partner_email: r.recipient_email,
-    partner_location: null,
-    partner_state: null,
-    partner_country: null,
-    partner_phone: null,
-    partner_address: null,
-    recipe_name: null,
-    cuisine_id: null,
-    cuisine_name: null,
-    assigned_products: [],
-    visitor_name: null,
-    visitor_email: null,
-    visitor_phone: null,
-    visit_date: null,
-    visit_time: null,
-    remarks: null,
-    status: "eligible",
-    email_status: "pending",
-    visitor_email_sent_at: null,
-    partner_email_sent_at: null,
-    submitted_at: null,
-    decision: null,
-    decision_comments: null,
-    total_products: null,
-    accepted_products: null,
-    rejected_products: null,
-    inspection_percentage: null,
-    product_inspections: [],
-    visitor_location: null,
-    form_status: "not_sent",
-    history: [],
-    photos: [],
-    invite_id: r.invite_id ?? null,
-  };
-}
-
 export function ReviewQueue({ courseId }: { courseId?: string }) {
   const qc = useQueryClient();
+  const navigate = useNavigate();
   const fnList = listReviewPartners;
   const [q, setQ] = useState("");
   const [statusFilter, setStatusFilter] = useState<string>("all");
   const [openInvite, setOpenInvite] = useState<string | null>(null);
-  const [manualVisitPartner, setManualVisitPartner] = useState<ReviewRow | null>(null);
 
   const query = useQuery({
     queryKey: ["lp-review-partners", courseId ?? "all"],
@@ -315,7 +262,17 @@ export function ReviewQueue({ courseId }: { courseId?: string }) {
                             <Button
                               size="sm"
                               variant="outline"
-                              onClick={() => setManualVisitPartner(r)}
+                              onClick={() =>
+                                navigate({
+                                  to: "/sft-training/physical-visit/assign/$visitId",
+                                  params: { visitId: `eligible-${r.user_id}` },
+                                  search: {
+                                    course_id: r.course_id,
+                                    partner_name: r.recipient_name,
+                                    partner_email: r.recipient_email,
+                                  },
+                                })
+                              }
                             >
                               <CalendarClock className="mr-1 h-3.5 w-3.5" /> Physical Visit
                             </Button>
@@ -345,25 +302,6 @@ export function ReviewQueue({ courseId }: { courseId?: string }) {
           onOpenChange={(open) => !open && setOpenInvite(null)}
         />
       )}
-
-      <Dialog
-        open={!!manualVisitPartner}
-        onOpenChange={(open) => !open && setManualVisitPartner(null)}
-      >
-        <DialogContent className="max-h-[90vh] max-w-2xl overflow-y-auto p-0">
-          {manualVisitPartner && (
-            <AssignVisitorForm
-              visit={manualEligibleVisitRow(manualVisitPartner)}
-              onCancel={() => setManualVisitPartner(null)}
-              onDone={() => {
-                qc.invalidateQueries({ queryKey: ["physical-visits"] });
-                qc.invalidateQueries({ queryKey: ["physical-visits-all"] });
-                setManualVisitPartner(null);
-              }}
-            />
-          )}
-        </DialogContent>
-      </Dialog>
     </Card>
   );
 }
