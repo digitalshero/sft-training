@@ -1415,15 +1415,23 @@ sftRoutes.get('/physical-visits', requirePhysicalVisit, async (req, res, next) =
     // A partner becomes eligible only once they've fully completed at least
     // one whole cuisine (every assigned product in it submitted, reviewed,
     // and approved) — not merely because any single product was approved.
-    // Pre-filter to partners with at least one approved file anywhere (cheap,
+    // Pre-filter to partners with at least one approved FILE anywhere (cheap,
     // and anyone with zero approvals can't possibly have a complete cuisine),
-    // then check each candidate's cuisines in full.
-    const approvedSubs = await prisma.lpProductSubmission.findMany({
-      where: { status: 'approved' },
-      orderBy: { reviewedAt: 'desc' },
+    // then check each candidate's cuisines in full. This must check each
+    // FILE's own decision, not a round's overall status — a round's status
+    // can come out as 'redo' even though some of its individual files were
+    // approved, if the same batch also included an unrelated redo from a
+    // different product/cuisine, which would otherwise hide an otherwise
+    // fully-completed cuisine from this list entirely.
+    const reviewedSubs = await prisma.lpProductSubmission.findMany({
+      where: { reviewedAt: { not: null } },
     });
-    const candidateUserIds = [...new Set(approvedSubs.map(s => s.userId))]
-      .filter(uid => !visitedUserIds.has(uid));
+    type ApprovalCheckFile = { decision?: string };
+    const candidateUserIds = [...new Set(
+      reviewedSubs
+        .filter(s => ((Array.isArray(s.files) ? s.files : []) as ApprovalCheckFile[]).some(f => f.decision === 'approved'))
+        .map(s => s.userId),
+    )].filter(uid => !visitedUserIds.has(uid));
 
     const completedCuisineByUser = new Map<string, string>();
     if (candidateUserIds.length) {
