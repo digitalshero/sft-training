@@ -53,7 +53,6 @@ import {
   getMyCookAssignments,
   chooseCuisine,
   removeCuisine,
-  submitCookUploads,
   uploadCookDraft,
   submitCookDraft,
   removeCookDraftImage,
@@ -528,18 +527,12 @@ function ProductChecklist({
   });
 
   const finalSubmitM = useMutation({
-    mutationFn: () => {
-      const files = assignments
-        .filter((a) => a.status !== "approved")
-        .flatMap((a) =>
-          (a.draft_uploads.length ? a.draft_uploads : a.uploads).map((u) => ({
-            path: u.path,
-            label: `${a.cuisine_name} — ${a.food_name}`,
-            assignment_id: a.assignment_id,
-          })),
-        );
-      return submitCookUploads({ course_id: courseId, files });
-    },
+    // Every product here was already filed into the admin-visible review
+    // round individually via its own Submit button (cook-drafts/:id/submit)
+    // before this becomes clickable — resending them here used to risk
+    // reopening an already-approved product if its status hadn't refreshed
+    // in this tab yet, so this is just the completion confirmation now.
+    mutationFn: () => Promise.resolve(),
     onSuccess: () => {
       confetti({
         particleCount: 100,

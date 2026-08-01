@@ -9,6 +9,36 @@ partnerRoutes.use(requireAuth);
 
 type SubmissionFile = { assignment_id?: string; path: string; label: string };
 
+// Server-side source of truth for "is this product already filed/decided?" —
+// walks this partner+course's submissions newest-first and returns the
+// resolved status of the first (i.e. latest) one holding a file for this
+// assignment, mirroring the same precedence GET /my-cook-assignments uses.
+// Upload/submit endpoints check this directly instead of trusting whatever
+// status the calling client believes is current, so a stale frontend can
+// no longer reopen an already-approved or already-pending product.
+async function getAssignmentSubmissionStatus(
+  db: Prisma.TransactionClient | typeof prisma,
+  userId: string,
+  courseId: string,
+  assignmentId: string,
+): Promise<'not_uploaded' | 'pending' | 'approved' | 'redo'> {
+  const subs = await db.lpProductSubmission.findMany({
+    where:   { userId, courseId },
+    orderBy: { submittedAt: 'desc' },
+  });
+  for (const s of subs) {
+    const files = ((s.files as (SubmissionFile & { decision?: string })[]) ?? [])
+      .filter(f => f.assignment_id === assignmentId);
+    if (!files.length) continue;
+    return files.some(f => f.decision === 'redo')
+      ? 'redo'
+      : files.every(f => f.decision === 'approved')
+        ? 'approved'
+        : 'pending';
+  }
+  return 'not_uploaded';
+}
+
 // Grows the partner's current UNREVIEWED submission for this course instead
 // of creating a sibling row every time a product is (re)submitted — this is
 // "the current active review round" that admin's Save Review acts on in one
@@ -774,6 +804,18 @@ partnerRoutes.post('/courses/:courseId/submit-cook', async (req: Request, res: R
       return;
     }
 
+    // Server-enforced, not just frontend-hidden: never let a photo reopen a
+    // product that's already been decided or is already awaiting review —
+    // otherwise a stale client (or any future bug resending old paths) can
+    // silently spawn a brand-new pending round for an already-approved item.
+    const statuses = await Promise.all(
+      assignmentIds.map(id => getAssignmentSubmissionStatus(prisma, userId, courseId, id)),
+    );
+    if (statuses.some(s => s === 'approved' || s === 'pending')) {
+      res.status(400).json({ error: 'One or more photos belong to a product that has already been submitted or approved' });
+      return;
+    }
+
     const sub = await prisma.$transaction((tx) => upsertIntoActiveSubmission(tx, userId, courseId, files));
     await prisma.lpPartnerEvent.create({
       data: { courseId, userId, eventType: 'product_submitted', payload: { submission_id: sub.id, file_count: files.length } },
@@ -798,6 +840,15 @@ partnerRoutes.post('/courses/:courseId/cook-drafts/:assignmentId/upload', async 
 
     const assignment = await prisma.lpProductAssignment.findFirst({ where: { id: assignmentId, userId, courseId, removedAt: null } });
     if (!assignment) { res.status(404).json({ error: 'Assignment not found' }); return; }
+
+    // Same server-side guard as /submit-cook — the UI already hides the
+    // upload control once a product is approved or awaiting review, but the
+    // server must refuse it too, not just rely on the client not asking.
+    const status = await getAssignmentSubmissionStatus(prisma, userId, courseId, assignmentId);
+    if (status === 'approved' || status === 'pending') {
+      res.status(400).json({ error: 'This product has already been submitted or approved — no further uploads needed right now' });
+      return;
+    }
 
     const existing = await prisma.lpProductUploadDraft.findUnique({ where: { assignmentId } });
     // A draft still marked 'submitted' here means this upload is the start
@@ -848,6 +899,13 @@ partnerRoutes.post('/courses/:courseId/cook-drafts/:assignmentId/submit', async 
 
     const assignment = await prisma.lpProductAssignment.findFirst({ where: { id: assignmentId, userId, courseId, removedAt: null } });
     if (!assignment) { res.status(404).json({ error: 'Assignment not found' }); return; }
+
+    // Same server-side guard as upload/submit-cook above.
+    const status = await getAssignmentSubmissionStatus(prisma, userId, courseId, assignmentId);
+    if (status === 'approved' || status === 'pending') {
+      res.status(400).json({ error: 'This product has already been submitted or approved — no further uploads needed right now' });
+      return;
+    }
 
     const draft = await prisma.lpProductUploadDraft.findUnique({ where: { assignmentId } });
     const files = ((draft?.files as Array<{ path: string }>) ?? []);
