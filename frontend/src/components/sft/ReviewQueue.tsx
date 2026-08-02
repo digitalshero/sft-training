@@ -185,6 +185,7 @@ export function ReviewQueue({ courseId }: { courseId?: string }) {
                   <TableHead>Partner</TableHead>
                   {!courseId && <TableHead>Course</TableHead>}
                   <TableHead>Modules</TableHead>
+                  <TableHead>Base</TableHead>
                   <TableHead>Product</TableHead>
                   <TableHead>Physical Visit</TableHead>
                   <TableHead>Certificate</TableHead>
@@ -210,6 +211,9 @@ export function ReviewQueue({ courseId }: { courseId?: string }) {
                       <div className="text-sm tabular-nums">
                         {r.modules_done}/{r.modules_total}
                       </div>
+                    </TableCell>
+                    <TableCell>
+                      <StatusBadge value={r.base_status} />
                     </TableCell>
                     <TableCell>
                       <StatusBadge value={r.submission_status} />

@@ -211,6 +211,7 @@ export interface ReviewPartnerRow {
   products_approved: number;
   products_redo: number;
   products_pending: number;
+  base_status: string | null;
   visit_status: string | null;
 }
 export interface ProductSubmission {

@@ -1054,7 +1054,7 @@ sftRoutes.get('/review', requireInviteCertifyOrReview, async (req, res, next) =>
     const userIds   = invites.map(i => i.userId).filter((x): x is string => !!x);
     const courseIds = [...new Set(invites.map(i => i.courseId))];
 
-    const [courses, mods, submissions, certs, extraCerts, visits, assignments, recipes, cuisines] = await Promise.all([
+    const [courses, mods, submissions, certs, extraCerts, visits, assignments, recipes, cuisines, baseProductSubs] = await Promise.all([
       prisma.lpCourse.findMany({ where: { id: { in: courseIds } }, select: { id: true, title: true, certificateTemplates: true } }),
       prisma.lpModule.findMany({ where: { courseId: { in: courseIds }, published: true }, select: { id: true, courseId: true } }),
       userIds.length ? prisma.lpProductSubmission.findMany({ where: { userId: { in: userIds }, courseId: { in: courseIds } }, orderBy: { submittedAt: 'desc' } }) : [],
@@ -1066,6 +1066,9 @@ sftRoutes.get('/review', requireInviteCertifyOrReview, async (req, res, next) =>
       userIds.length ? prisma.lpProductAssignment.findMany({ where: { userId: { in: userIds }, courseId: { in: courseIds }, removedAt: null } }) : [],
       courseIds.length ? prisma.lpRecipe.findMany({ where: { courseId: { in: courseIds } } }) : [],
       courseIds.length ? prisma.lpCuisine.findMany({ where: { courseId: { in: courseIds } } }) : [],
+      // Base Product submissions, for the "Base" column below — same
+      // per-partner+course grouping as `submissions`, kept entirely separate.
+      userIds.length ? prisma.baseProductSubmission.findMany({ where: { userId: { in: userIds }, courseId: { in: courseIds } }, orderBy: { submittedAt: 'desc' } }) : [],
     ]);
 
     const courseMap    = new Map(courses.map(c => [c.id, c.title]));
@@ -1120,6 +1123,16 @@ sftRoutes.get('/review', requireInviteCertifyOrReview, async (req, res, next) =>
     const certByKey = new Map<string, typeof certs[0]>();
     certs.forEach(c => certByKey.set(`${c.userId}::${c.courseId}`, c));
 
+    // Same grouping as subsByKey above, for Base Product submissions — kept
+    // in its own map so Base and Product statuses never mix.
+    const bpSubsByKey = new Map<string, typeof baseProductSubs>();
+    baseProductSubs.forEach(s => {
+      const k = `${s.userId}::${s.courseId}`;
+      const arr = bpSubsByKey.get(k) ?? [];
+      arr.push(s);
+      bpSubsByKey.set(k, arr);
+    });
+
     // Latest physical visit per partner+course, for the exported status column.
     const visitByKey = new Map<string, typeof visits[0]>();
     visits.forEach(v => {
@@ -1162,6 +1175,23 @@ sftRoutes.get('/review', requireInviteCertifyOrReview, async (req, res, next) =>
       const aggregatedStatus = subs.some(s => s.status === 'pending')
         ? 'pending'
         : (newestSub?.status ?? null);
+
+      // Same aggregation as Product's aggregatedStatus above, adapted for
+      // BaseProductSubmission (which has no round-level status column — it
+      // derives everything live from per-file decisions, same as the rest
+      // of the Base Product feature): any round still awaiting review means
+      // "pending"; otherwise fall back to the newest reviewed round's own
+      // outcome, read off its files (redo if any photo was sent back, else
+      // approved — every file is decided before a round can be reviewed).
+      const bpSubs = key ? (bpSubsByKey.get(key) ?? []) : [];
+      const bpNewest = bpSubs[0]; // already ordered submittedAt desc
+      type BpFileForStatus = { decision?: string };
+      const baseStatus = bpSubs.some(s => s.reviewedAt === null)
+        ? 'pending'
+        : bpNewest
+          ? (((bpNewest.files as BpFileForStatus[]) ?? []).some(f => f.decision === 'redo') ? 'redo' : 'approved')
+          : null;
+
       const cert = key ? certByKey.get(key) : undefined;
       const total = modsByCourse.get(i.courseId)?.length ?? 0;
       const done  = i.userId ? (doneByKey.get(i.userId)?.size ?? 0) : 0;
@@ -1198,6 +1228,7 @@ sftRoutes.get('/review', requireInviteCertifyOrReview, async (req, res, next) =>
         products_approved: productStatuses.filter(s => s === 'approved').length,
         products_redo: productStatuses.filter(s => s === 'redo').length,
         products_pending: productStatuses.filter(s => s === 'pending').length,
+        base_status: baseStatus,
         // Was previously never populated on this endpoint — the frontend
         // type/rendering already expected this exact field name.
         visit_status: visit?.status ?? null,
