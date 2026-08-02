@@ -258,6 +258,11 @@ function CuisineCookView({
       fnChoose({ course_id: courseId, cuisineId }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["lp-cook-assignments", courseId] });
+      // The Base Products panel is a separate query from the product list
+      // above — picking a cuisine can newly bring Base Products into scope,
+      // so it must refetch too, or the panel keeps showing its earlier
+      // (pre-selection, empty) result until an unrelated refresh happens.
+      qc.invalidateQueries({ queryKey: ["lp-my-base-products", courseId] });
       toast.success("Cuisine selected — your products are ready");
     },
     onError: (e: Error) => toast.error(e.message),
@@ -268,6 +273,7 @@ function CuisineCookView({
       fnRemove({ course_id: courseId, cuisineId }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["lp-cook-assignments", courseId] });
+      qc.invalidateQueries({ queryKey: ["lp-my-base-products", courseId] });
       toast.success("Cuisine removed");
     },
     onError: (e: Error) => toast.error(e.message),
