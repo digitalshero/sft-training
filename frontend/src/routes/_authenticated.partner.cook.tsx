@@ -42,6 +42,7 @@ import {
   ChevronDown,
   Info,
   Trash2,
+  Layers,
 } from "lucide-react";
 import { UploadPanel } from "@/components/partner/upload-panel";
 import {
@@ -58,6 +59,13 @@ import {
   removeCookDraftImage,
 } from "@/lib/learning/cuisines.functions";
 import type { Cuisine } from "@/lib/learning/cuisines.functions";
+import {
+  getMyBaseProducts,
+  uploadBaseProductDraft,
+  submitBaseProductDraft,
+  removeBaseProductDraftImage,
+} from "@/lib/learning/base-products.functions";
+import type { PartnerBaseProductRow } from "@/lib/learning/base-products.functions";
 import { useClearNotificationsOnVisit } from "@/lib/partner/notifications.functions";
 
 import type { Recipe } from "@/lib/learning/recipes.functions";
@@ -236,6 +244,14 @@ function CuisineCookView({
     queryKey: ["lp-partner-cuisines", courseId],
     queryFn: () => fnCuisines({ course_id: courseId }),
   });
+  // Cuisines selected before Base Products existed (or with none configured)
+  // simply never appear here — see getMyBaseProducts on the backend — so for
+  // every partner/cuisine unaffected by this feature, baseProductsQ.data is
+  // always [] and everything below becomes a no-op.
+  const baseProductsQ = useQuery<PartnerBaseProductRow[]>({
+    queryKey: ["lp-my-base-products", courseId],
+    queryFn: () => getMyBaseProducts({ course_id: courseId }),
+  });
 
   const choose = useMutation({
     mutationFn: (cuisineId: string) =>
@@ -257,7 +273,7 @@ function CuisineCookView({
     onError: (e: Error) => toast.error(e.message),
   });
 
-  if (assignQ.isLoading || cuisinesQ.isLoading)
+  if (assignQ.isLoading || cuisinesQ.isLoading || baseProductsQ.isLoading)
     return <Loader2 className="h-5 w-5 animate-spin text-accent" />;
 
   const assignments = assignQ.data ?? [];
@@ -270,6 +286,25 @@ function CuisineCookView({
   // be blocked once a product has been uploaded — only certified partners
   // are locked out entirely.
   const canRemove = !isCertified;
+
+  const baseProductRows = baseProductsQ.data ?? [];
+  const baseProductsByCuisine = new Map<string, PartnerBaseProductRow[]>();
+  baseProductRows.forEach((r) => {
+    const arr = baseProductsByCuisine.get(r.cuisine_id) ?? [];
+    arr.push(r);
+    baseProductsByCuisine.set(r.cuisine_id, arr);
+  });
+  const lockedCuisineIds = new Set(
+    [...baseProductsByCuisine.entries()]
+      .filter(([, rows]) => rows.some((r) => r.status !== "approved"))
+      .map(([cuisineId]) => cuisineId),
+  );
+  const unlockedAssignments = assignments.filter(
+    (a) => !lockedCuisineIds.has(a.cuisine_id),
+  );
+
+  const invalidateBaseProducts = () =>
+    qc.invalidateQueries({ queryKey: ["lp-my-base-products", courseId] });
 
   return (
     <div className="space-y-5">
@@ -287,10 +322,37 @@ function CuisineCookView({
           }
         }}
       />
-      {assignments.length > 0 && (
+      {[...lockedCuisineIds].map((cuisineId) => {
+        const rows = baseProductsByCuisine.get(cuisineId) ?? [];
+        const lockedProductNames = assignments
+          .filter((a) => a.cuisine_id === cuisineId)
+          .map((a) => a.food_name);
+        return (
+          <div key={cuisineId} className="space-y-3">
+            <BasePrepPanel
+              courseId={courseId}
+              cuisineName={rows[0]?.cuisine_name ?? ""}
+              rows={rows}
+              onChanged={invalidateBaseProducts}
+            />
+            {lockedProductNames.length > 0 && (
+              <div className="flex items-start gap-2 rounded-xl border border-dashed border-border bg-muted/20 p-4 text-sm text-muted-foreground">
+                <Lock className="mt-0.5 h-4 w-4 shrink-0" />
+                <div>
+                  <p className="font-medium">
+                    Product To Cook — locked until Base Products are approved
+                  </p>
+                  <p className="text-xs">{lockedProductNames.join(", ")}</p>
+                </div>
+              </div>
+            )}
+          </div>
+        );
+      })}
+      {unlockedAssignments.length > 0 && (
         <ProductChecklist
           courseId={courseId}
-          assignments={assignments}
+          assignments={unlockedAssignments}
           locked={isCertified}
         />
       )}
@@ -449,6 +511,348 @@ function StatusBadge({ item }: { item: PartnerAssignedRecipe }) {
       </Badge>
     );
   return <Badge variant="outline">Pending</Badge>;
+}
+
+// A base product needs no further action once approved, already sitting in
+// review, or already submitted this round — same shape as isProductResolved
+// above, kept separate rather than shared so this file's two upload flows
+// stay fully independent.
+function isBaseProductResolved(r: PartnerBaseProductRow): boolean {
+  if (r.status === "redo") return false;
+  if (r.status === "approved" || r.status === "pending") return true;
+  return r.draft_status === "submitted";
+}
+
+function BaseProductStatusBadge({ row }: { row: PartnerBaseProductRow }) {
+  if (row.status === "approved")
+    return (
+      <Badge className="gap-1 bg-success/15 text-success border-success/30">
+        <CheckCircle2 className="h-3 w-3" /> Approved
+      </Badge>
+    );
+  if (row.status === "redo")
+    return (
+      <Badge variant="destructive" className="gap-1">
+        <RotateCcw className="h-3 w-3" /> Redo Required
+      </Badge>
+    );
+  if (row.status === "pending")
+    return (
+      <Badge variant="secondary" className="gap-1">
+        <Loader2 className="h-3 w-3" /> Pending review
+      </Badge>
+    );
+  if (row.draft_status === "submitted")
+    return (
+      <Badge className="gap-1 bg-success/15 text-success border-success/30">
+        <CheckCircle2 className="h-3 w-3" /> Submitted
+      </Badge>
+    );
+  if (row.draft_uploads.length > 0)
+    return (
+      <Badge className="gap-1 bg-success/15 text-success border-success/30">
+        <CheckCircle2 className="h-3 w-3" /> Uploaded
+      </Badge>
+    );
+  return <Badge variant="outline">Pending</Badge>;
+}
+
+// The mandatory pre-stage shown above Product To Cook for any cuisine that
+// has Base Products configured and isn't exempt (see isPreExistingCuisineSelection
+// on the backend) — mirrors ProductChecklist + UploadZone's upload/submit UX
+// closely, kept as its own component so nothing in the existing product flow
+// has to change to accommodate it.
+function BasePrepPanel({
+  courseId,
+  cuisineName,
+  rows,
+  onChanged,
+}: {
+  courseId: string;
+  cuisineName: string;
+  rows: PartnerBaseProductRow[];
+  onChanged: () => void;
+}) {
+  const [activeId, setActiveId] = useState<string | null>(null);
+
+  const uploadDraftM = useMutation({
+    mutationFn: (vars: { partnerBaseProductId: string; path: string }) =>
+      uploadBaseProductDraft({ course_id: courseId, ...vars }),
+    onSuccess: onChanged,
+    onError: (e: Error) => toast.error(e.message),
+  });
+  const removeImageM = useMutation({
+    mutationFn: (vars: { partnerBaseProductId: string; path: string }) =>
+      removeBaseProductDraftImage({ course_id: courseId, ...vars }),
+    onSuccess: onChanged,
+    onError: (e: Error) => toast.error(e.message),
+  });
+  const submitDraftM = useMutation({
+    mutationFn: (partnerBaseProductId: string) =>
+      submitBaseProductDraft({ course_id: courseId, partnerBaseProductId }),
+    onSuccess: () => {
+      toast.success("Base product submitted");
+      onChanged();
+    },
+    onError: (e: Error) => toast.error(e.message),
+  });
+
+  const actionable = rows.filter((r) => !isBaseProductResolved(r));
+  const active =
+    rows.find((r) => r.partner_base_product_id === activeId) ??
+    actionable[0] ??
+    rows[0] ??
+    null;
+
+  if (!active) return null;
+
+  return (
+    <Card className="rounded-2xl border-amber-300/50 bg-amber-50/40 dark:border-amber-800/40 dark:bg-amber-950/10">
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2 text-base">
+          <Layers className="h-4 w-4" /> Prepare Bases — {cuisineName}
+        </CardTitle>
+        <CardDescription>{rows[0]?.description ?? ""}</CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-2.5">
+        {rows.map((r) => {
+          const isActive = r.partner_base_product_id === active.partner_base_product_id;
+          return (
+            <button
+              key={r.partner_base_product_id}
+              type="button"
+              onClick={() => setActiveId(r.partner_base_product_id)}
+              className={`flex w-full items-center justify-between gap-3 rounded-xl border p-3 text-left transition ${
+                isActive
+                  ? "border-amber-400/60 bg-amber-100/40 dark:bg-amber-900/20"
+                  : "border-border bg-card hover:bg-muted/40"
+              }`}
+            >
+              <span className="text-sm font-medium">
+                {r.base_product_name}
+              </span>
+              <BaseProductStatusBadge row={r} />
+            </button>
+          );
+        })}
+
+        <BaseUploadZone
+          key={active.partner_base_product_id}
+          active={active}
+          uploading={
+            uploadDraftM.isPending &&
+            uploadDraftM.variables?.partnerBaseProductId ===
+              active.partner_base_product_id
+          }
+          submitting={
+            submitDraftM.isPending &&
+            submitDraftM.variables === active.partner_base_product_id
+          }
+          removing={
+            removeImageM.isPending &&
+            removeImageM.variables?.partnerBaseProductId ===
+              active.partner_base_product_id
+          }
+          onUpload={(path) =>
+            uploadDraftM.mutate({
+              partnerBaseProductId: active.partner_base_product_id,
+              path,
+            })
+          }
+          onRemoveImage={(path) =>
+            removeImageM.mutate({
+              partnerBaseProductId: active.partner_base_product_id,
+              path,
+            })
+          }
+          onSubmit={() => submitDraftM.mutate(active.partner_base_product_id)}
+        />
+      </CardContent>
+    </Card>
+  );
+}
+
+function BaseUploadZone({
+  active,
+  uploading: persisting,
+  submitting,
+  removing,
+  onUpload,
+  onRemoveImage,
+  onSubmit,
+}: {
+  active: PartnerBaseProductRow;
+  uploading: boolean;
+  submitting: boolean;
+  removing: boolean;
+  onUpload: (path: string) => void;
+  onRemoveImage: (path: string) => void;
+  onSubmit: () => void;
+}) {
+  const [uploading, setUploading] = useState(false);
+
+  const ALLOWED_TYPES = ["image/jpeg", "image/jpg", "image/png"];
+  const ALLOWED_EXTENSIONS = ["jpg", "jpeg", "png"];
+  const MAX_SIZE_MB = 10;
+
+  async function pick(file: File) {
+    const ext = (file.name.split(".").pop() || "").toLowerCase();
+
+    if (
+      !ALLOWED_TYPES.includes(file.type) ||
+      !ALLOWED_EXTENSIONS.includes(ext)
+    ) {
+      toast.error(
+        "Only JPG or PNG images are allowed. PDF and other file types are not accepted for base product photos.",
+      );
+      return;
+    }
+
+    if (file.size > MAX_SIZE_MB * 1024 * 1024) {
+      toast.error(`Image is too large. Maximum size is ${MAX_SIZE_MB}MB.`);
+      return;
+    }
+
+    setUploading(true);
+    try {
+      const path = `partner/${crypto.randomUUID()}.${ext}`;
+      const uploadErr = await uploadToStorage("sft-practice", path, file);
+      if (uploadErr) throw uploadErr;
+      onUpload(path);
+    } catch (e) {
+      toast.error((e as Error).message);
+    } finally {
+      setUploading(false);
+    }
+  }
+
+  const locked = isBaseProductResolved(active);
+
+  return (
+    <div className="rounded-xl border border-border bg-card p-4 space-y-3">
+      <div className="text-sm font-semibold">
+        {active.base_product_name}
+      </div>
+      {active.admin_comment && (
+        <div
+          className={`flex gap-2 rounded-md border p-2 text-xs ${
+            active.status === "redo"
+              ? "border-destructive/30 bg-destructive/5"
+              : "border-success/30 bg-success/5"
+          }`}
+        >
+          <AlertCircle
+            className={`h-3.5 w-3.5 shrink-0 ${
+              active.status === "redo" ? "text-destructive" : "text-success"
+            }`}
+          />
+          <div>
+            <b>{active.status === "redo" ? "Redo:" : "Trainer feedback:"}</b>{" "}
+            {active.admin_comment}
+          </div>
+        </div>
+      )}
+
+      {locked ? (
+        <>
+          {(active.draft_uploads.length > 0
+            ? active.draft_uploads
+            : active.uploads
+          ).length > 0 && (
+            <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+              {(active.draft_uploads.length > 0
+                ? active.draft_uploads
+                : active.uploads
+              ).map((u) => (
+                <div
+                  key={u.path}
+                  className="aspect-4/3 overflow-hidden rounded-xl border border-border"
+                >
+                  <img
+                    src={u.url}
+                    alt={active.base_product_name}
+                    className="h-full w-full object-cover"
+                  />
+                </div>
+              ))}
+            </div>
+          )}
+          <div className="grid place-items-center rounded-xl border border-border bg-muted/20 p-4 text-center text-xs text-muted-foreground">
+            {active.status === "approved"
+              ? "Approved — no changes needed."
+              : "Submitted — awaiting review."}
+          </div>
+        </>
+      ) : (
+        <>
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+            {active.draft_uploads.map((u) => (
+              <div
+                key={u.path}
+                className="relative aspect-4/3 overflow-hidden rounded-xl border border-border"
+              >
+                <img
+                  src={u.url}
+                  alt={active.base_product_name}
+                  className="h-full w-full object-cover"
+                />
+                <button
+                  type="button"
+                  disabled={removing}
+                  onClick={() => onRemoveImage(u.path)}
+                  className="absolute right-1 top-1 rounded-full bg-background/80 p-1 text-destructive hover:bg-background disabled:opacity-50"
+                >
+                  <Trash2 className="h-3.5 w-3.5" />
+                </button>
+              </div>
+            ))}
+            <label
+              className={`grid aspect-4/3 cursor-pointer place-items-center rounded-xl border border-dashed border-success/40 bg-success/5 text-center transition hover:bg-success/10 ${
+                uploading || persisting ? "pointer-events-none opacity-60" : ""
+              }`}
+            >
+              <input
+                type="file"
+                accept="image/*"
+                className="hidden"
+                disabled={uploading || persisting}
+                onChange={(e) => {
+                  const file = e.target.files?.[0];
+                  e.target.value = "";
+                  if (file) pick(file);
+                }}
+              />
+              {uploading || persisting ? (
+                <Loader2 className="h-6 w-6 animate-spin text-success" />
+              ) : (
+                <>
+                  <UploadCloud className="h-6 w-6 text-success" />
+                  <span className="mt-1 text-xs font-semibold text-success">
+                    {active.draft_uploads.length ? "Add another" : "Choose image"}
+                  </span>
+                </>
+              )}
+            </label>
+          </div>
+          <p className="text-center text-xs text-muted-foreground">
+            JPG, PNG up to {MAX_SIZE_MB}MB each — upload as many as you need.
+          </p>
+          <Button
+            className="w-full"
+            disabled={active.draft_uploads.length === 0 || submitting}
+            onClick={onSubmit}
+          >
+            {submitting ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : (
+              <ClipboardCheck className="h-4 w-4" />
+            )}
+            Submit {active.base_product_name}
+          </Button>
+        </>
+      )}
+    </div>
+  );
 }
 
 function ProductChecklist({

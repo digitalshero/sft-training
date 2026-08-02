@@ -7,6 +7,7 @@ import {
   adminIssueCertificate,
   adminRevokeCertificate,
 } from "@/lib/learning/learning.functions";
+import { reviewBaseProductSubmission } from "@/lib/learning/base-products.functions";
 import { DeletePartnerRecordButton } from "./DeletePartnerRecordButton";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -29,6 +30,7 @@ import {
   Ban,
   Clock,
   FileImage,
+  Layers,
 } from "lucide-react";
 
 export function StatusBadge({ value }: { value: string | null | undefined }) {
@@ -84,6 +86,21 @@ type ProductRow = {
   rounds: ProductRoundRow[]; // newest round first
 };
 
+type BaseProductRoundRow = {
+  submission_id: string;
+  submitted_at: string;
+  reviewed_at: string | null;
+  feedback?: string | null;
+  files_signed: ProductFile[];
+};
+
+type BaseProductRow = {
+  partner_base_product_id: string;
+  cuisine_name: string;
+  base_product_name: string;
+  rounds: BaseProductRoundRow[]; // newest round first
+};
+
 type PartnerTimelineData = {
   partner: {
     display_name?: string | null;
@@ -103,6 +120,7 @@ type PartnerTimelineData = {
     progress_pct?: number | null;
   }>;
   products: ProductRow[];
+  base_products: BaseProductRow[];
   certificate?: { id: string; code: string; issued_at: string | null } | null;
   timeline: Array<{
     title: string;
@@ -276,6 +294,30 @@ export function PartnerTimelineDialog({
                   }
                   partnerEmail={data.partner.email}
                   courseTitle={data.course.title}
+                  inviteId={inviteId}
+                />
+              )}
+            </section>
+
+            {/* Base Product submissions — separate, additive section, same
+                pending/reviewed split as Product submissions above. Only
+                ever non-empty for a cuisine that has Base Products
+                configured and wasn't selected before that feature launched. */}
+            <section>
+              <h3 className="mb-2 flex items-center gap-2 text-sm font-semibold">
+                <Layers className="h-4 w-4" /> Base Product submissions
+                <span className="text-xs font-normal text-muted-foreground">
+                  ({data.base_products.length}{" "}
+                  {data.base_products.length === 1 ? "item" : "items"})
+                </span>
+              </h3>
+              {data.base_products.length === 0 ? (
+                <div className="rounded-md border border-dashed p-4 text-sm text-muted-foreground">
+                  No Base Product submissions for this partner.
+                </div>
+              ) : (
+                <BaseProductReviewPanel
+                  baseProducts={data.base_products}
                   inviteId={inviteId}
                 />
               )}
@@ -743,6 +785,305 @@ function PendingReviewCard({
             <XCircle className="mr-1 h-3.5 w-3.5" /> Compose redo email
           </Button>
         )}
+        {!allDecided && (
+          <span className="text-xs text-muted-foreground">
+            Mark every photo as Right or Redo to save.
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+type PendingBaseProductEntry = {
+  partner_base_product_id: string;
+  cuisine_name: string;
+  base_product_name: string;
+  round: BaseProductRoundRow;
+};
+
+type DecidedBaseProductEntry = {
+  partner_base_product_id: string;
+  cuisine_name: string;
+  base_product_name: string;
+  reviewedRounds: BaseProductRoundRow[]; // oldest first
+};
+
+// Same pending/reviewed split and per-photo Right/Redo/remark pattern as
+// ProductReviewPanel/PendingReviewCard above, scoped to Base Products and
+// saved via reviewBaseProductSubmission instead — kept as its own component
+// tree so nothing in the existing product review flow has to change.
+function BaseProductReviewPanel({
+  baseProducts,
+  inviteId,
+}: {
+  baseProducts: BaseProductRow[];
+  inviteId: string;
+}) {
+  const pending: PendingBaseProductEntry[] = baseProducts
+    .filter((p) => p.rounds[0] && p.rounds[0].reviewed_at === null)
+    .map((p) => ({
+      partner_base_product_id: p.partner_base_product_id,
+      cuisine_name: p.cuisine_name,
+      base_product_name: p.base_product_name,
+      round: p.rounds[0],
+    }));
+  const decided: DecidedBaseProductEntry[] = baseProducts
+    .map((p) => ({
+      partner_base_product_id: p.partner_base_product_id,
+      cuisine_name: p.cuisine_name,
+      base_product_name: p.base_product_name,
+      reviewedRounds: p.rounds
+        .filter((r) => r.reviewed_at !== null)
+        .slice()
+        .reverse(),
+    }))
+    .filter((p) => p.reviewedRounds.length > 0);
+
+  return (
+    <div className="space-y-4">
+      {pending.length > 0 && (
+        <BaseProductPendingReviewCard products={pending} inviteId={inviteId} />
+      )}
+      {decided.length > 0 && (
+        <div className="space-y-3 rounded-md border p-3">
+          <div className="text-sm font-medium">Reviewed Base Products</div>
+          {decided.map((p) => (
+            <div
+              key={p.partner_base_product_id}
+              className="space-y-2 rounded-md border p-2"
+            >
+              <div className="min-w-0">
+                <div className="truncate text-xs text-muted-foreground">
+                  {p.cuisine_name}
+                </div>
+                <div className="truncate text-sm font-medium">
+                  {p.base_product_name}
+                </div>
+              </div>
+              <div className="space-y-2">
+                {p.reviewedRounds.map((round, idx) => {
+                  const redo = round.files_signed.some(
+                    (f) => f.decision === "redo",
+                  );
+                  const remark = round.files_signed.find(
+                    (f) => f.remark,
+                  )?.remark;
+                  return (
+                    <div
+                      key={round.submission_id}
+                      className="space-y-2 rounded-md border border-dashed p-2"
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-xs font-medium text-muted-foreground">
+                          Round {idx + 1}
+                        </span>
+                        <StatusBadge value={redo ? "redo" : "approved"} />
+                      </div>
+                      <div className="grid grid-cols-2 gap-2">
+                        {round.files_signed.map((f) => (
+                          <a
+                            key={f.path}
+                            href={f.url}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="block aspect-square overflow-hidden rounded bg-muted"
+                          >
+                            <img
+                              src={f.url}
+                              alt={p.base_product_name}
+                              className="h-full w-full object-cover"
+                            />
+                          </a>
+                        ))}
+                      </div>
+                      {remark && (
+                        <div className="rounded bg-muted/50 p-2 text-xs">
+                          <span className="font-medium">Admin note:</span>{" "}
+                          {remark}
+                        </div>
+                      )}
+                      <div className="text-xs text-muted-foreground">
+                        Reviewed {fmt(round.reviewed_at)}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function BaseProductPendingReviewCard({
+  products,
+  inviteId,
+}: {
+  products: PendingBaseProductEntry[];
+  inviteId: string;
+}) {
+  const qc = useQueryClient();
+  const submittedAt = products[0].round.submitted_at;
+
+  const [decisions, setDecisions] = useState<
+    Record<string, { decision?: "approved" | "redo"; remark?: string }>
+  >({});
+  const [feedback, setFeedback] = useState<string>(
+    products[0].round.feedback ?? "",
+  );
+
+  const allFileKeys = products.flatMap((p) =>
+    p.round.files_signed.map((f) => fileKey(p.partner_base_product_id, f.path)),
+  );
+  const allDecided = allFileKeys.every(
+    (k) =>
+      decisions[k]?.decision === "approved" ||
+      decisions[k]?.decision === "redo",
+  );
+
+  const save = useMutation({
+    mutationFn: () =>
+      reviewBaseProductSubmission({
+        id: products[0].round.submission_id,
+        decision: allFileKeys.some((k) => decisions[k]?.decision === "redo")
+          ? "redo"
+          : "approved",
+        feedback: feedback || undefined,
+        files: products.flatMap((p) =>
+          p.round.files_signed.map((f) => {
+            const key = fileKey(p.partner_base_product_id, f.path);
+            return {
+              partner_base_product_id: p.partner_base_product_id,
+              label: `${p.cuisine_name} — ${p.base_product_name}`.trim(),
+              path: f.path,
+              decision: (decisions[key]?.decision ?? "approved") as
+                | "approved"
+                | "redo",
+              remark: decisions[key]?.remark || undefined,
+            };
+          }),
+        ),
+      }),
+    onSuccess: () => {
+      toast.success("Review saved");
+      qc.invalidateQueries({ queryKey: ["lp-partner-timeline", inviteId] });
+      qc.invalidateQueries({ queryKey: ["lp-review-partners"] });
+    },
+    onError: (e: Error) => toast.error(e.message),
+  });
+
+  function setDecision(key: string, decision: "approved" | "redo") {
+    setDecisions((prev) => ({ ...prev, [key]: { ...prev[key], decision } }));
+  }
+  function setRemark(key: string, remark: string) {
+    setDecisions((prev) => ({ ...prev, [key]: { ...prev[key], remark } }));
+  }
+
+  return (
+    <div className="space-y-3 rounded-md border p-3">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="text-sm">
+          <span className="font-medium">Needs review</span>
+          <span className="ml-2 text-xs text-muted-foreground">
+            Submitted {fmt(submittedAt)}
+          </span>
+        </div>
+        <StatusBadge value="pending" />
+      </div>
+
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+        {products.flatMap((p) =>
+          p.round.files_signed.map((f) => {
+            const key = fileKey(p.partner_base_product_id, f.path);
+            const decision = decisions[key]?.decision;
+            const remark = decisions[key]?.remark ?? "";
+            return (
+              <div key={key} className="space-y-2 rounded-md border p-2">
+                <a
+                  href={f.url}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="block aspect-square overflow-hidden rounded bg-muted"
+                >
+                  <img
+                    src={f.url}
+                    alt={p.base_product_name}
+                    className="h-full w-full object-cover"
+                  />
+                </a>
+                <div
+                  className="truncate text-xs text-muted-foreground"
+                  title={`${p.cuisine_name} — ${p.base_product_name}`}
+                >
+                  {p.cuisine_name} — {p.base_product_name}
+                </div>
+                <div className="flex gap-1">
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant={decision === "approved" ? "default" : "outline"}
+                    className={
+                      decision === "approved"
+                        ? "flex-1 bg-emerald-600 hover:bg-emerald-600/90"
+                        : "flex-1"
+                    }
+                    onClick={() => setDecision(key, "approved")}
+                  >
+                    <CheckCircle2 className="mr-1 h-3.5 w-3.5" /> Right
+                  </Button>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant={decision === "redo" ? "default" : "outline"}
+                    className={
+                      decision === "redo"
+                        ? "flex-1 bg-orange-600 hover:bg-orange-600/90"
+                        : "flex-1"
+                    }
+                    onClick={() => setDecision(key, "redo")}
+                  >
+                    <RotateCcw className="mr-1 h-3.5 w-3.5" /> Redo
+                  </Button>
+                </div>
+                <Textarea
+                  rows={2}
+                  placeholder={
+                    decision === "redo"
+                      ? "What to fix on this base product…"
+                      : "Notes for this photo (optional)…"
+                  }
+                  value={remark}
+                  onChange={(e) => setRemark(key, e.target.value)}
+                />
+              </div>
+            );
+          }),
+        )}
+      </div>
+
+      <Textarea
+        rows={2}
+        placeholder="Overall remarks (optional)…"
+        value={feedback}
+        onChange={(e) => setFeedback(e.target.value)}
+      />
+
+      <div className="flex flex-wrap items-center gap-2">
+        <Button
+          size="sm"
+          disabled={!allDecided || save.isPending}
+          onClick={() => save.mutate()}
+        >
+          {save.isPending ? (
+            <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />
+          ) : (
+            <CheckCircle2 className="mr-1 h-3.5 w-3.5" />
+          )}
+          Save review
+        </Button>
         {!allDecided && (
           <span className="text-xs text-muted-foreground">
             Mark every photo as Right or Redo to save.

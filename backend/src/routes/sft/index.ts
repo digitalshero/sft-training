@@ -824,7 +824,14 @@ sftRoutes.get('/invites/:id/events', requireInviteCertifyOrReview, async (req, r
     const recipeIds = [...new Set(assignments.map(a => a.recipeId))];
     const recipes = recipeIds.length ? await prisma.lpRecipe.findMany({ where: { id: { in: recipeIds } } }) : [];
     const recipeMap = new Map(recipes.map(r => [r.id, r] as const));
-    const cuisineIds = [...new Set([...assignments.map(a => a.cuisineId), ...recipes.map(r => r.cuisineId).filter((x): x is string => !!x)])];
+    const partnerBaseProducts = invite.userId
+      ? await prisma.partnerBaseProduct.findMany({ where: { userId: invite.userId, courseId: invite.courseId } })
+      : [];
+    const cuisineIds = [...new Set([
+      ...assignments.map(a => a.cuisineId),
+      ...recipes.map(r => r.cuisineId).filter((x): x is string => !!x),
+      ...partnerBaseProducts.map(r => r.cuisineId),
+    ])];
     const cuisines = cuisineIds.length ? await prisma.lpCuisine.findMany({ where: { id: { in: cuisineIds } } }) : [];
     const cuisineMap = new Map(cuisines.map(c => [c.id, c] as const));
     const cookStartedAt = assignments.length
@@ -906,6 +913,77 @@ sftRoutes.get('/invites/:id/events', requireInviteCertifyOrReview, async (req, r
       })),
     }));
 
+    // Base Products — same round-grouping approach as products above, scoped
+    // to BaseProductSubmission/PartnerBaseProduct. A cuisine selected before
+    // Base Products launched simply has no PartnerBaseProduct rows, so it
+    // naturally contributes nothing here — no special-casing needed.
+    const baseProductSubmissionsRaw = invite.userId
+      ? await prisma.baseProductSubmission.findMany({
+          where: { userId: invite.userId, courseId: invite.courseId },
+          orderBy: { submittedAt: 'desc' },
+        })
+      : [];
+    const baseProductIds = [...new Set(partnerBaseProducts.map(r => r.baseProductId))];
+    const baseProductDefs = baseProductIds.length
+      ? await prisma.baseProduct.findMany({ where: { id: { in: baseProductIds } } })
+      : [];
+    const baseProductDefMap = new Map(baseProductDefs.map(b => [b.id, b] as const));
+
+    type BpSubFile = { partner_base_product_id?: string; path: string; decision?: string | null; remark?: string | null };
+    type BpRound = (typeof baseProductSubmissionsRaw)[number];
+    type BpRoundFiles = { files: BpSubFile[]; round: BpRound };
+    const bpRoundsById = new Map<string, BpRoundFiles[]>();
+    for (const s of baseProductSubmissionsRaw) {
+      const files = (Array.isArray(s.files) ? s.files : []) as BpSubFile[];
+      const byIdThisRound = new Map<string, BpSubFile[]>();
+      for (const f of files) {
+        if (!f.partner_base_product_id) continue;
+        if (!byIdThisRound.has(f.partner_base_product_id)) byIdThisRound.set(f.partner_base_product_id, []);
+        byIdThisRound.get(f.partner_base_product_id)!.push(f);
+      }
+      for (const [id, fs] of byIdThisRound) {
+        const arr = bpRoundsById.get(id) ?? [];
+        arr.push({ files: fs, round: s });
+        bpRoundsById.set(id, arr);
+      }
+    }
+
+    const baseProductRows = partnerBaseProducts
+      .map(r => {
+        const bp = baseProductDefMap.get(r.baseProductId);
+        const cuisine = cuisineMap.get(r.cuisineId);
+        const rounds = bpRoundsById.get(r.id) ?? [];
+        if (!rounds.length) return null;
+        return {
+          partner_base_product_id: r.id,
+          cuisine_name: cuisine?.name ?? '',
+          base_product_name: bp?.name ?? '',
+          rounds, // already newest-first, since baseProductSubmissionsRaw was ordered submittedAt desc
+        };
+      })
+      .filter((r): r is NonNullable<typeof r> => r !== null);
+
+    const allBpPaths = baseProductRows.flatMap(r => r.rounds.flatMap(rd => rd.files.map(f => f.path)));
+    const allBpUrls = await signFilePaths('sft-practice', allBpPaths);
+    let bpUrlCursor = 0;
+    const base_products = baseProductRows.map(r => ({
+      partner_base_product_id: r.partner_base_product_id,
+      cuisine_name: r.cuisine_name,
+      base_product_name: r.base_product_name,
+      rounds: r.rounds.map(rd => ({
+        submission_id: rd.round.id,
+        submitted_at: rd.round.submittedAt,
+        reviewed_at: rd.round.reviewedAt,
+        feedback: rd.round.feedback,
+        files_signed: rd.files.map(f => ({
+          path: f.path,
+          url: allBpUrls[bpUrlCursor++] ?? '',
+          decision: f.decision ?? null,
+          remark: f.remark ?? null,
+        })),
+      })),
+    }));
+
     const visit = invite.userId
       ? await prisma.lpPhysicalVisit.findFirst({
           where: { userId: invite.userId, courseId: invite.courseId },
@@ -953,6 +1031,7 @@ sftRoutes.get('/invites/:id/events', requireInviteCertifyOrReview, async (req, r
       course: { id: course.id, title: course.title },
       modules: modulesOut,
       products,
+      base_products,
       certificate: certificate && !certificate.revokedAt
         ? { id: certificate.id, code: certificate.code, issued_at: certificate.issuedAt }
         : null,
@@ -1201,6 +1280,70 @@ sftRoutes.post('/submissions/:id/review', requireReview, async (req: Request, re
   } catch (e) { next(e); }
 });
 
+// Straight copy of /submissions/:id/review above, operating on
+// BaseProductSubmission instead of LpProductSubmission — same lock +
+// fresh-read + conflict-detection transaction, same event/notification shape.
+sftRoutes.post('/base-product-submissions/:id/review', requireReview, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const reviewerId = (req as AuthRequest).user.id;
+    const { decision, feedback, files } = req.body as {
+      decision: string; feedback?: string; files?: Array<{ partner_base_product_id?: string; path: string }>;
+    };
+
+    const existing = await prisma.baseProductSubmission.findUniqueOrThrow({
+      where: { id: req.params.id }, select: { userId: true, courseId: true },
+    });
+
+    const result = await prisma.$transaction(async (tx) => {
+      const lockKey = `base-product-submission:${existing.userId}:${existing.courseId}`;
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${lockKey})::bigint)`;
+
+      const fresh = await tx.baseProductSubmission.findUniqueOrThrow({ where: { id: req.params.id } });
+      if (fresh.reviewedAt !== null) {
+        return { conflict: 'This round has already been reviewed — refresh and try again.' } as const;
+      }
+
+      if (files) {
+        const freshFiles = (Array.isArray(fresh.files) ? fresh.files : []) as Array<{ partner_base_product_id?: string; path: string }>;
+        const fileKey = (f: { partner_base_product_id?: string; path: string }) => f.partner_base_product_id ?? f.path;
+        const incomingKeys = new Set(files.map(fileKey));
+        const addedSincePageLoad = freshFiles.some(f => !incomingKeys.has(fileKey(f)));
+        if (addedSincePageLoad) {
+          return { conflict: 'The partner submitted another base product since you opened this review — refresh and try again so nothing gets missed.' } as const;
+        }
+      }
+
+      const sub = await tx.baseProductSubmission.update({
+        where: { id: req.params.id },
+        data: {
+          feedback:   feedback ?? null,
+          reviewerId,
+          reviewedAt: new Date(),
+          ...(files ? { files: files as unknown as Prisma.InputJsonValue } : {}),
+        },
+      });
+      return { sub } as const;
+    });
+
+    if ('conflict' in result) { res.status(409).json({ error: result.conflict }); return; }
+    const sub = result.sub;
+
+    await prisma.lpPartnerEvent.create({
+      data: { courseId: sub.courseId, userId: sub.userId, eventType: `base_product_submission_${decision}`, payload: { submission_id: sub.id, feedback: feedback ?? null } },
+    });
+    await createNotification(
+      sub.userId,
+      'prepare_cook',
+      decision === 'approved'
+        ? 'Your Base Product submission has been approved.'
+        : 'Your Base Product submission needs changes — please redo and resubmit.',
+      feedback,
+      sub.id,
+    );
+    res.json({ ok: true });
+  } catch (e) { next(e); }
+});
+
 // ─────────────────────────────────────────────────────────────────────────────
 // CERTIFICATES (admin)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1321,6 +1464,50 @@ function resolvePartnerProductStatus(
   return 'not_uploaded';
 }
 
+// A cuisine selection that already existed before Base Products launched is
+// permanently exempt from Base Product gating, no matter how far along the
+// partner was or when Base Products get added to it later. Duplicated from
+// the identical helper in partner/index.ts, matching this file's existing
+// convention of duplicating small resolver helpers across route files.
+async function isPreExistingCuisineSelection(userId: string, courseId: string, cuisineId: string): Promise<boolean> {
+  const [rollout, earliest] = await Promise.all([
+    prisma.baseProductsRollout.findUnique({ where: { id: 1 } }),
+    prisma.lpProductAssignment.findFirst({
+      where:   { userId, courseId, cuisineId },
+      orderBy: { createdAt: 'asc' },
+      select:  { createdAt: true },
+    }),
+  ]);
+  if (!rollout || !earliest) return false;
+  return earliest.createdAt < rollout.launchedAt;
+}
+
+type BpSubFileForStatus = { partner_base_product_id?: string; decision?: string };
+
+// Only ever needs to look at cuisines that are NOT pre-existing selections —
+// those are always satisfied regardless of what Base Products exist now.
+async function isCuisineBaseProductsSatisfied(userId: string, courseId: string, cuisineId: string): Promise<boolean> {
+  if (await isPreExistingCuisineSelection(userId, courseId, cuisineId)) return true;
+  const baseProducts = await prisma.baseProduct.findMany({ where: { cuisineId, active: true } });
+  if (!baseProducts.length) return true;
+  const partnerRows = await prisma.partnerBaseProduct.findMany({
+    where: { userId, courseId, cuisineId, baseProductId: { in: baseProducts.map(b => b.id) } },
+  });
+  if (partnerRows.length < baseProducts.length) return false;
+  const subs = await prisma.baseProductSubmission.findMany({ where: { userId, courseId }, orderBy: { submittedAt: 'desc' } });
+  const statusFor = (partnerBaseProductId: string): string => {
+    for (const s of subs) {
+      const files = ((s.files as BpSubFileForStatus[]) ?? []).filter(f => f.partner_base_product_id === partnerBaseProductId);
+      if (!files.length) continue;
+      if (files.some(f => f.decision === 'redo')) return 'redo';
+      if (files.every(f => f.decision === 'approved')) return 'approved';
+      return 'pending';
+    }
+    return 'not_uploaded';
+  };
+  return partnerRows.every(r => statusFor(r.id) === 'approved');
+}
+
 sftRoutes.get('/partners/:userId/courses/:courseId/selected-cuisines', requirePhysicalVisit, async (req, res, next) => {
   try {
     const { userId, courseId } = req.params;
@@ -1356,11 +1543,13 @@ sftRoutes.get('/partners/:userId/courses/:courseId/selected-cuisines', requirePh
       arr.push(status);
       byCuisine.set(cuisineId, arr);
     });
-    const completedCuisineIds = new Set(
-      [...byCuisine.entries()]
-        .filter(([, statuses]) => statuses.length > 0 && statuses.every(s => s === 'approved'))
-        .map(([id]) => id),
+    const productCompleteCuisineIds = [...byCuisine.entries()]
+      .filter(([, statuses]) => statuses.length > 0 && statuses.every(s => s === 'approved'))
+      .map(([id]) => id);
+    const baseProductChecks = await Promise.all(
+      productCompleteCuisineIds.map(async cid => [cid, await isCuisineBaseProductsSatisfied(userId, courseId, cid)] as const),
     );
+    const completedCuisineIds = new Set(baseProductChecks.filter(([, ok]) => ok).map(([id]) => id));
 
     res.json({
       cuisines: cuisines
@@ -1473,6 +1662,7 @@ sftRoutes.get('/physical-visits', requirePhysicalVisit, async (req, res, next) =
       for (const uid of candidateUserIds) {
         const userAssignments = assignmentsByUser.get(uid) ?? [];
         const byCuisine = new Map<string, string[]>();
+        const courseIdByCuisine = new Map<string, string>();
         for (const a of userAssignments) {
           const recipe = recipeMap.get(a.recipeId);
           const cuisineId = recipe?.cuisineId ?? a.cuisineId ?? '';
@@ -1482,9 +1672,19 @@ sftRoutes.get('/physical-visits', requirePhysicalVisit, async (req, res, next) =
           const arr = byCuisine.get(cuisineId) ?? [];
           arr.push(status);
           byCuisine.set(cuisineId, arr);
+          courseIdByCuisine.set(cuisineId, a.courseId);
         }
-        const completedCuisineId = [...byCuisine.entries()]
-          .find(([, statuses]) => statuses.length > 0 && statuses.every(s => s === 'approved'))?.[0];
+        // Product-complete cuisines only, in the same order as before — then
+        // additionally require Base Products (if any, and if this isn't a
+        // cuisine selection that predates Base Products entirely).
+        const productCompleteCuisineIds = [...byCuisine.entries()]
+          .filter(([, statuses]) => statuses.length > 0 && statuses.every(s => s === 'approved'))
+          .map(([id]) => id);
+        let completedCuisineId: string | undefined;
+        for (const cid of productCompleteCuisineIds) {
+          const cCourseId = courseIdByCuisine.get(cid)!;
+          if (await isCuisineBaseProductsSatisfied(uid, cCourseId, cid)) { completedCuisineId = cid; break; }
+        }
         if (completedCuisineId) completedCuisineByUser.set(uid, completedCuisineId);
       }
     }

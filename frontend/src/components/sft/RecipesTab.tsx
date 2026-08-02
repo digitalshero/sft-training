@@ -11,6 +11,7 @@ import {
   type Recipe,
 } from "@/lib/learning/recipes.functions";
 import { listCuisines } from "@/lib/learning/cuisines.functions";
+import { BaseProductsTab } from "@/components/sft/BaseProductsTab";
 import {
   Card,
   CardContent,
@@ -159,6 +160,8 @@ export function RecipesTab({ course }: { course: Course }) {
           )}
         </CardContent>
       </Card>
+
+      <BaseProductsTab course={course} />
 
       <AssignmentsCard courseId={course.id} />
 

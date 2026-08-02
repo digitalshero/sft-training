@@ -456,6 +456,7 @@ model LpCourse {
   partnerEvents      LpPartnerEvent[]
   cuisines           LpCuisine[]
   recipes            LpRecipe[]
+  baseProducts       BaseProduct[]
   sampleImageGuide   LpSampleImageGuide?
   physicalVisits     LpPhysicalVisit[]
   inspectionSlots    LpInspectionSlot[]
@@ -804,8 +805,9 @@ model LpCuisine {
   active    Boolean  @default(true)
   createdAt DateTime @default(now()) @map("created_at")
 
-  course  LpCourse    @relation(fields: [courseId], references: [id], onDelete: Cascade)
-  recipes LpRecipe[]
+  course       LpCourse      @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  recipes      LpRecipe[]
+  baseProducts BaseProduct[]
 
   @@map("lp_cuisines")
 }
@@ -885,6 +887,94 @@ model LpProductUploadDraft {
 
   @@index([userId, courseId])
   @@map("lp_product_upload_drafts")
+}
+
+// ─── Base Products ────────────────────────────────────────────────────────────
+// A mandatory preparation stage a cuisine can optionally require before its
+// existing Product To Cook products unlock (e.g. Chettinad → Toor Dal Base,
+// OTM Base). Entirely additive: a cuisine with no BaseProduct rows behaves
+// exactly as it always has. See BaseProductsRollout below for how existing
+// partner journeys are protected from this being applied retroactively.
+
+model BaseProduct {
+  id          String   @id @default(uuid())
+  courseId    String   @map("course_id")
+  cuisineId   String   @map("cuisine_id")
+  name        String
+  description String   @default("Prepare the below listed bases, refer to HDM 2 Chart in downloads - post in app - get approval - start preparing the items under Product to cook")
+  active      Boolean  @default(true)
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  course  LpCourse  @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  cuisine LpCuisine @relation(fields: [cuisineId], references: [id], onDelete: Cascade)
+
+  @@unique([cuisineId, name])
+  @@map("base_products")
+}
+
+// Mirrors LpProductAssignment exactly, including soft-delete via removedAt —
+// no stored status here on purpose; status is always derived live from
+// BaseProductSubmission, same as LpProductAssignment never stores one either.
+model PartnerBaseProduct {
+  id            String    @id @default(uuid())
+  userId        String    @map("user_id")
+  courseId      String    @map("course_id")
+  cuisineId     String    @map("cuisine_id")
+  baseProductId String    @map("base_product_id")
+  createdAt     DateTime  @default(now()) @map("created_at")
+  removedAt     DateTime? @map("removed_at")
+
+  @@unique([userId, courseId, cuisineId, baseProductId])
+  @@index([userId, courseId])
+  @@map("partner_base_products")
+}
+
+// Mirrors LpProductUploadDraft exactly: the partner's own private working
+// copy (upload / add another / remove) before Submit bundles it into a
+// BaseProductSubmission round below.
+model BaseProductUploadDraft {
+  id                   String    @id @default(uuid())
+  userId               String    @map("user_id")
+  courseId             String    @map("course_id")
+  partnerBaseProductId String    @unique @map("partner_base_product_id")
+  files                Json      @default("[]")
+  status               String    @default("pending")
+  submittedAt          DateTime? @map("submitted_at")
+  createdAt            DateTime  @default(now()) @map("created_at")
+  updatedAt            DateTime  @updatedAt @map("updated_at")
+
+  @@index([userId, courseId])
+  @@map("base_product_upload_drafts")
+}
+
+// Mirrors LpProductSubmission exactly: one row per review round, JSON array
+// of files each carrying { base_product_id, path, decision?, remark? }, at
+// most one reviewedAt: null row per partner+course at a time.
+model BaseProductSubmission {
+  id          String    @id @default(uuid())
+  userId      String    @map("user_id")
+  courseId    String    @map("course_id")
+  files       Json      @default("[]")
+  feedback    String?
+  reviewerId  String?   @map("reviewer_id")
+  reviewedAt  DateTime? @map("reviewed_at")
+  submittedAt DateTime  @default(now()) @map("submitted_at")
+
+  @@index([userId, courseId])
+  @@map("base_product_submissions")
+}
+
+// Single-row table. Its one row's launchedAt is stamped by this feature's own
+// migration (at actual deploy time) and is the entire mechanism behind "never
+// gate a cuisine a partner had already selected before Base Products existed"
+// — every LpProductAssignment created before this timestamp is permanently
+// exempt from any Base Product requirement, regardless of completion state.
+model BaseProductsRollout {
+  id         Int      @id @default(1)
+  launchedAt DateTime @default(now()) @map("launched_at")
+
+  @@map("base_products_rollout")
 }
 
 // ─── Physical Visits ──────────────────────────────────────────────────────────

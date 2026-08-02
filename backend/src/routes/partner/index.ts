@@ -39,6 +39,135 @@ async function getAssignmentSubmissionStatus(
   return 'not_uploaded';
 }
 
+// ── Base Products ─────────────────────────────────────────────────────────────
+// A cuisine selection that already existed before Base Products launched is
+// permanently exempt from any Base Product requirement, no matter how far
+// along (or not) the partner was, and no matter when Base Products get added
+// to that cuisine later. Reactivating a removed cuisine preserves the
+// assignment row's original createdAt (chooseCuisineForCourse only ever
+// updates removedAt on restore), so this stays correct through remove/re-add
+// cycles too.
+async function isPreExistingCuisineSelection(userId: string, courseId: string, cuisineId: string): Promise<boolean> {
+  const [rollout, earliest] = await Promise.all([
+    prisma.baseProductsRollout.findUnique({ where: { id: 1 } }),
+    prisma.lpProductAssignment.findFirst({
+      where:   { userId, courseId, cuisineId },
+      orderBy: { createdAt: 'asc' },
+      select:  { createdAt: true },
+    }),
+  ]);
+  if (!rollout || !earliest) return false;
+  return earliest.createdAt < rollout.launchedAt;
+}
+
+type BaseProductSubmissionFile = { partner_base_product_id?: string; path: string; label: string };
+
+// Same newest-round-first resolution as getAssignmentSubmissionStatus above,
+// scoped to BaseProductSubmission and keyed by partner_base_product_id.
+async function getPartnerBaseProductFiles(
+  db: Prisma.TransactionClient | typeof prisma,
+  userId: string,
+  courseId: string,
+  partnerBaseProductId: string,
+): Promise<{
+  status: 'not_uploaded' | 'pending' | 'approved' | 'redo';
+  files: Array<BaseProductSubmissionFile & { decision?: string; remark?: string }>;
+  feedback: string | null;
+}> {
+  const subs = await db.baseProductSubmission.findMany({
+    where:   { userId, courseId },
+    orderBy: { submittedAt: 'desc' },
+  });
+  for (const s of subs) {
+    const files = ((s.files as (BaseProductSubmissionFile & { decision?: string; remark?: string })[]) ?? [])
+      .filter(f => f.partner_base_product_id === partnerBaseProductId);
+    if (!files.length) continue;
+    const status = files.some(f => f.decision === 'redo')
+      ? 'redo'
+      : files.every(f => f.decision === 'approved')
+        ? 'approved'
+        : 'pending';
+    return { status, files, feedback: s.feedback ?? null };
+  }
+  return { status: 'not_uploaded', files: [], feedback: null };
+}
+
+// Only ever needs to look at cuisines that are NOT pre-existing selections —
+// a pre-existing one is always satisfied regardless of what Base Products
+// exist for it now.
+async function isCuisineBaseProductsSatisfied(userId: string, courseId: string, cuisineId: string): Promise<boolean> {
+  if (await isPreExistingCuisineSelection(userId, courseId, cuisineId)) return true;
+  const baseProducts = await prisma.baseProduct.findMany({ where: { cuisineId, active: true } });
+  if (!baseProducts.length) return true;
+  const partnerRows = await prisma.partnerBaseProduct.findMany({
+    where: { userId, courseId, cuisineId, baseProductId: { in: baseProducts.map(b => b.id) } },
+  });
+  if (partnerRows.length < baseProducts.length) return false;
+  const statuses = await Promise.all(
+    partnerRows.map(r => getPartnerBaseProductFiles(prisma, userId, courseId, r.id).then(f => f.status)),
+  );
+  return statuses.every(s => s === 'approved');
+}
+
+// Same top-up-on-read pattern as topUpCuisineAssignments below, scoped to
+// Base Products — adds any active BaseProduct under this cuisine that this
+// partner doesn't have a row for yet (e.g. an admin added one after the
+// partner already picked the cuisine).
+async function topUpCuisineBaseProducts(
+  db: Prisma.TransactionClient,
+  userId: string,
+  courseId: string,
+  cuisineId: string,
+) {
+  const lockKey = `top-up-base-products:${userId}:${courseId}:${cuisineId}`;
+  await db.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${lockKey})::bigint)`;
+
+  const [baseProducts, existing] = await Promise.all([
+    db.baseProduct.findMany({ where: { cuisineId, active: true } }),
+    db.partnerBaseProduct.findMany({ where: { userId, courseId, cuisineId } }),
+  ]);
+  if (!baseProducts.length) return;
+
+  const haveIds = new Set(existing.map(e => e.baseProductId));
+  const missing = baseProducts.filter(b => !haveIds.has(b.id));
+  if (missing.length) {
+    await db.partnerBaseProduct.createMany({
+      data: missing.map(b => ({ userId, courseId, cuisineId, baseProductId: b.id })),
+    });
+  }
+}
+
+// Grows the partner's current UNREVIEWED Base Product submission round —
+// same pattern as upsertIntoActiveSubmission below, scoped to BaseProductSubmission.
+async function upsertIntoActiveBaseProductSubmission(
+  db: Prisma.TransactionClient,
+  userId: string,
+  courseId: string,
+  newFiles: BaseProductSubmissionFile[],
+) {
+  const lockKey = `base-product-submission:${userId}:${courseId}`;
+  await db.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${lockKey})::bigint)`;
+
+  const active = await db.baseProductSubmission.findFirst({
+    where:   { userId, courseId, reviewedAt: null },
+    orderBy: { submittedAt: 'desc' },
+  });
+
+  if (!active) {
+    return db.baseProductSubmission.create({
+      data: { userId, courseId, files: newFiles, submittedAt: new Date() },
+    });
+  }
+
+  const existingFiles = (active.files as BaseProductSubmissionFile[]) ?? [];
+  const incomingIds = new Set(newFiles.map(f => f.partner_base_product_id).filter(Boolean));
+  const kept = existingFiles.filter(f => !f.partner_base_product_id || !incomingIds.has(f.partner_base_product_id));
+  return db.baseProductSubmission.update({
+    where: { id: active.id },
+    data:  { files: [...kept, ...newFiles] },
+  });
+}
+
 // Grows the partner's current UNREVIEWED submission for this course instead
 // of creating a sibling row every time a product is (re)submitted — this is
 // "the current active review round" that admin's Save Review acts on in one
@@ -816,6 +945,20 @@ partnerRoutes.post('/courses/:courseId/submit-cook', async (req: Request, res: R
       return;
     }
 
+    // Base Products gate — a no-op for any cuisine selected before Base
+    // Products existed, or one with no Base Products configured at all.
+    const assignments = await prisma.lpProductAssignment.findMany({ where: { id: { in: assignmentIds } } });
+    const recipes = await prisma.lpRecipe.findMany({ where: { id: { in: assignments.map(a => a.recipeId) } } });
+    const recipeMap = new Map(recipes.map(r => [r.id, r] as const));
+    const cuisineIds = [...new Set(assignments.map(a => recipeMap.get(a.recipeId)?.cuisineId ?? a.cuisineId))];
+    const baseProductChecks = await Promise.all(
+      cuisineIds.map(cid => isCuisineBaseProductsSatisfied(userId, courseId, cid)),
+    );
+    if (baseProductChecks.some(ok => !ok)) {
+      res.status(400).json({ error: 'Finish and get this cuisine\'s Base Products approved before submitting its products' });
+      return;
+    }
+
     const sub = await prisma.$transaction((tx) => upsertIntoActiveSubmission(tx, userId, courseId, files));
     await prisma.lpPartnerEvent.create({
       data: { courseId, userId, eventType: 'product_submitted', payload: { submission_id: sub.id, file_count: files.length } },
@@ -847,6 +990,15 @@ partnerRoutes.post('/courses/:courseId/cook-drafts/:assignmentId/upload', async 
     const status = await getAssignmentSubmissionStatus(prisma, userId, courseId, assignmentId);
     if (status === 'approved' || status === 'pending') {
       res.status(400).json({ error: 'This product has already been submitted or approved — no further uploads needed right now' });
+      return;
+    }
+
+    // Base Products gate — a no-op for any cuisine selected before Base
+    // Products existed, or one with no Base Products configured at all.
+    const recipeForGate = await prisma.lpRecipe.findUnique({ where: { id: assignment.recipeId } });
+    const cuisineIdForGate = recipeForGate?.cuisineId ?? assignment.cuisineId;
+    if (!(await isCuisineBaseProductsSatisfied(userId, courseId, cuisineIdForGate))) {
+      res.status(400).json({ error: 'Finish and get this cuisine\'s Base Products approved before uploading its products' });
       return;
     }
 
@@ -918,6 +1070,13 @@ partnerRoutes.post('/courses/:courseId/cook-drafts/:assignmentId/submit', async 
     const cuisine   = cuisineId ? await prisma.lpCuisine.findUnique({ where: { id: cuisineId } }) : null;
     const label     = `${cuisine?.name ?? ''} — ${recipe?.foodName ?? ''}`.trim();
 
+    // Base Products gate — a no-op for any cuisine selected before Base
+    // Products existed, or one with no Base Products configured at all.
+    if (!(await isCuisineBaseProductsSatisfied(userId, courseId, cuisineId))) {
+      res.status(400).json({ error: 'Finish and get this cuisine\'s Base Products approved before submitting its products' });
+      return;
+    }
+
     const submissionFiles: SubmissionFile[] = files.map(f => ({ assignment_id: assignmentId, path: f.path, label }));
     const [updated, sub] = await prisma.$transaction(async (tx) => {
       const updatedDraft = await tx.lpProductUploadDraft.update({
@@ -929,6 +1088,185 @@ partnerRoutes.post('/courses/:courseId/cook-drafts/:assignmentId/submit', async 
     });
     await prisma.lpPartnerEvent.create({
       data: { courseId, userId, eventType: 'product_submitted', payload: { submission_id: sub.id, file_count: files.length, label } },
+    });
+
+    res.json({ id: updated.id, status: updated.status, submission_id: sub.id });
+  } catch (e) { next(e); }
+});
+
+// ── Base Products (partner view) ──────────────────────────────────────────────
+// Mirrors the Product To Cook draft trio above exactly, scoped to
+// PartnerBaseProduct/BaseProductSubmission/BaseProductUploadDraft. A cuisine
+// selected before Base Products launched (isPreExistingCuisineSelection) is
+// never surfaced here at all, so an existing partner's Learn & Cook page
+// never sees a new "Prepare Bases" card for a cuisine they already picked.
+
+partnerRoutes.get('/courses/:courseId/my-base-products', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const userId   = (req as AuthRequest).user.id;
+    const courseId = req.params.courseId;
+
+    const activeCuisineIds = await prisma.lpProductAssignment.findMany({
+      where: { userId, courseId, removedAt: null },
+      select: { cuisineId: true },
+      distinct: ['cuisineId'],
+    });
+
+    const result: Array<{
+      partner_base_product_id: string;
+      cuisine_id: string;
+      cuisine_name: string;
+      base_product_name: string;
+      description: string;
+      status: 'not_uploaded' | 'pending' | 'approved' | 'redo';
+      admin_comment: string | null;
+      uploads: Array<{ path: string; url: string; decision: string | null; remark: string | null }>;
+      draft_status: 'none' | 'pending' | 'submitted';
+      draft_uploads: Array<{ path: string; url: string }>;
+    }> = [];
+
+    for (const { cuisineId } of activeCuisineIds) {
+      if (await isPreExistingCuisineSelection(userId, courseId, cuisineId)) continue;
+
+      await prisma.$transaction(tx => topUpCuisineBaseProducts(tx, userId, courseId, cuisineId));
+
+      const baseProducts = await prisma.baseProduct.findMany({ where: { cuisineId, active: true } });
+      if (!baseProducts.length) continue;
+
+      const cuisine = await prisma.lpCuisine.findUnique({ where: { id: cuisineId } });
+      const baseProductMap = new Map(baseProducts.map(b => [b.id, b] as const));
+      const partnerRows = await prisma.partnerBaseProduct.findMany({
+        where: { userId, courseId, cuisineId, baseProductId: { in: baseProducts.map(b => b.id) } },
+      });
+      const drafts = await prisma.baseProductUploadDraft.findMany({
+        where: { partnerBaseProductId: { in: partnerRows.map(r => r.id) } },
+      });
+      const draftByRow = new Map(drafts.map(d => [d.partnerBaseProductId, d] as const));
+
+      for (const row of partnerRows) {
+        const bp = baseProductMap.get(row.baseProductId);
+        if (!bp) continue;
+        const { status, files, feedback } = await getPartnerBaseProductFiles(prisma, userId, courseId, row.id);
+        const uploads = await Promise.all(files.map(async f => ({
+          path:     f.path,
+          url:      await createSignedUrl('sft-practice', f.path),
+          decision: f.decision ?? null,
+          remark:   f.remark ?? null,
+        })));
+        const draft = draftByRow.get(row.id);
+        const draftFiles = (draft?.files as Array<{ path: string }>) ?? [];
+        const draftUploads = await Promise.all(draftFiles.map(async f => ({
+          path: f.path,
+          url:  await createSignedUrl('sft-practice', f.path),
+        })));
+
+        result.push({
+          partner_base_product_id: row.id,
+          cuisine_id: cuisineId,
+          cuisine_name: cuisine?.name ?? '',
+          base_product_name: bp.name,
+          description: bp.description,
+          status,
+          admin_comment: uploads.find(u => u.remark)?.remark ?? feedback,
+          uploads,
+          draft_status: (draft?.status as 'none' | 'pending' | 'submitted' | undefined) ?? 'none',
+          draft_uploads: draftUploads,
+        });
+      }
+    }
+
+    res.json(result);
+  } catch (e) { next(e); }
+});
+
+partnerRoutes.post('/courses/:courseId/base-product-drafts/:partnerBaseProductId/upload', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const userId   = (req as AuthRequest).user.id;
+    const courseId = req.params.courseId;
+    const { partnerBaseProductId } = req.params;
+    const { path: filePath } = req.body as { path?: string };
+    if (!filePath) { res.status(400).json({ error: 'path required' }); return; }
+
+    const row = await prisma.partnerBaseProduct.findFirst({ where: { id: partnerBaseProductId, userId, courseId } });
+    if (!row) { res.status(404).json({ error: 'Base product not found' }); return; }
+
+    const { status } = await getPartnerBaseProductFiles(prisma, userId, courseId, partnerBaseProductId);
+    if (status === 'approved' || status === 'pending') {
+      res.status(400).json({ error: 'This base product has already been submitted or approved — no further uploads needed right now' });
+      return;
+    }
+
+    const existing = await prisma.baseProductUploadDraft.findUnique({ where: { partnerBaseProductId } });
+    // Same post-redo fresh-start rule as the product drafts above.
+    const priorFiles = existing?.status === 'submitted'
+      ? []
+      : ((existing?.files as Array<{ path: string }>) ?? []);
+    const files = [...priorFiles, { path: filePath }];
+
+    const draft = await prisma.baseProductUploadDraft.upsert({
+      where:  { partnerBaseProductId },
+      create: { userId, courseId, partnerBaseProductId, files },
+      update: { files, status: 'pending', submittedAt: null },
+    });
+    res.status(201).json({ id: draft.id, status: draft.status, files: draft.files });
+  } catch (e) { next(e); }
+});
+
+partnerRoutes.post('/courses/:courseId/base-product-drafts/:partnerBaseProductId/remove-image', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const userId   = (req as AuthRequest).user.id;
+    const courseId = req.params.courseId;
+    const { partnerBaseProductId } = req.params;
+    const { path: filePath } = req.body as { path?: string };
+    if (!filePath) { res.status(400).json({ error: 'path required' }); return; }
+
+    const row = await prisma.partnerBaseProduct.findFirst({ where: { id: partnerBaseProductId, userId, courseId } });
+    if (!row) { res.status(404).json({ error: 'Base product not found' }); return; }
+
+    const draft = await prisma.baseProductUploadDraft.findUnique({ where: { partnerBaseProductId } });
+    if (!draft) { res.status(404).json({ error: 'No draft found' }); return; }
+    if (draft.status !== 'pending') { res.status(400).json({ error: 'Cannot remove images after submitting' }); return; }
+
+    const files = ((draft.files as Array<{ path: string }>) ?? []).filter(f => f.path !== filePath);
+    const updated = await prisma.baseProductUploadDraft.update({ where: { partnerBaseProductId }, data: { files } });
+    res.json({ id: updated.id, status: updated.status, files: updated.files });
+  } catch (e) { next(e); }
+});
+
+partnerRoutes.post('/courses/:courseId/base-product-drafts/:partnerBaseProductId/submit', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const userId   = (req as AuthRequest).user.id;
+    const courseId = req.params.courseId;
+    const { partnerBaseProductId } = req.params;
+
+    const row = await prisma.partnerBaseProduct.findFirst({ where: { id: partnerBaseProductId, userId, courseId } });
+    if (!row) { res.status(404).json({ error: 'Base product not found' }); return; }
+
+    const { status } = await getPartnerBaseProductFiles(prisma, userId, courseId, partnerBaseProductId);
+    if (status === 'approved' || status === 'pending') {
+      res.status(400).json({ error: 'This base product has already been submitted or approved — no further uploads needed right now' });
+      return;
+    }
+
+    const draft = await prisma.baseProductUploadDraft.findUnique({ where: { partnerBaseProductId } });
+    const files = ((draft?.files as Array<{ path: string }>) ?? []);
+    if (!draft || files.length === 0) { res.status(400).json({ error: 'Upload at least one photo before submitting' }); return; }
+
+    const baseProduct = await prisma.baseProduct.findUnique({ where: { id: row.baseProductId } });
+    const cuisine     = await prisma.lpCuisine.findUnique({ where: { id: row.cuisineId } });
+    const label       = `${cuisine?.name ?? ''} — ${baseProduct?.name ?? ''}`.trim();
+
+    const submissionFiles: BaseProductSubmissionFile[] = files.map(f => ({ partner_base_product_id: partnerBaseProductId, path: f.path, label }));
+    const [updated, sub] = await prisma.$transaction(async (tx) => {
+      const updatedDraft = await tx.baseProductUploadDraft.update({
+        where: { partnerBaseProductId },
+        data:  { status: 'submitted', submittedAt: new Date() },
+      });
+      const submission = await upsertIntoActiveBaseProductSubmission(tx, userId, courseId, submissionFiles);
+      return [updatedDraft, submission] as const;
+    });
+    await prisma.lpPartnerEvent.create({
+      data: { courseId, userId, eventType: 'base_product_submitted', payload: { submission_id: sub.id, file_count: files.length, label } },
     });
 
     res.json({ id: updated.id, status: updated.status, submission_id: sub.id });

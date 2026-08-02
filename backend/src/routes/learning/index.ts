@@ -28,6 +28,15 @@ function mapRecipeBody(b: Record<string, unknown>): Record<string, unknown> {
   return d;
 }
 
+function mapBaseProductBody(b: Record<string, unknown>): Record<string, unknown> {
+  const d: Record<string, unknown> = { ...b };
+  const rename: Record<string, string> = {
+    course_id: 'courseId', cuisine_id: 'cuisineId',
+  };
+  for (const [s, c] of Object.entries(rename)) { if (s in d) { d[c] = d[s]; delete d[s]; } }
+  return d;
+}
+
 function mapSampleGuideBody(b: Record<string, unknown>): Record<string, unknown> {
   const d: Record<string, unknown> = { ...b };
   const rename: Record<string, string> = {
@@ -54,6 +63,15 @@ function serializeRecipe(r: Record<string, unknown>) {
     image_path: r.imagePath, active: r.active, sort_order: r.sortOrder,
     status: r.status, created_at: r.createdAt,
     image_url: r.image_url, cuisine_name: r.cuisine_name,
+  };
+}
+
+function serializeBaseProduct(b: Record<string, unknown>) {
+  return {
+    id: b.id, course_id: b.courseId, cuisine_id: b.cuisineId,
+    name: b.name, description: b.description, active: b.active,
+    created_at: b.createdAt, updated_at: b.updatedAt,
+    cuisine_name: b.cuisine_name,
   };
 }
 
@@ -580,6 +598,56 @@ learningRoutes.post('/recipes', requireEditor, async (req: Request, res: Respons
 learningRoutes.delete('/recipes/:id', requireEditor, async (req, res, next) => {
   try {
     await prisma.lpRecipe.delete({ where: { id: req.params.id } });
+    res.json({ ok: true });
+  } catch (e) { next(e); }
+});
+
+// ── Base Products ─────────────────────────────────────────────────────────────
+// A separate, optional prerequisite stage per cuisine — see schema.prisma for
+// why it's kept in its own tables rather than folded into Recipe/Assignment.
+
+learningRoutes.get('/courses/:courseId/base-products', requireEditor, async (req, res, next) => {
+  try {
+    const { cuisine_id } = req.query as { cuisine_id?: string };
+    const baseProducts = await prisma.baseProduct.findMany({
+      where:   { courseId: req.params.courseId, ...(cuisine_id ? { cuisineId: cuisine_id } : {}) },
+      include: { cuisine: { select: { name: true } } },
+      orderBy: { createdAt: 'desc' },
+    });
+    res.json(baseProducts.map(b => serializeBaseProduct({
+      ...b,
+      cuisine_name: (b as any).cuisine?.name ?? null,
+    } as unknown as Record<string, unknown>)));
+  } catch (e) { next(e); }
+});
+
+learningRoutes.post('/base-products', requireEditor, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const b = mapBaseProductBody((req.body.data ?? req.body) as Record<string, unknown>);
+    const id = b.id as string | undefined;
+    const cuisineId = b.cuisineId as string;
+    const name = (b.name as string)?.trim();
+    if (!cuisineId) { res.status(400).json({ error: 'Select a cuisine' }); return; }
+    if (!name) { res.status(400).json({ error: 'Base product name is required' }); return; }
+
+    const existing = await prisma.baseProduct.findFirst({ where: { cuisineId, name } });
+    if (existing && existing.id !== id) {
+      res.status(400).json({ error: 'Base product already exists for this cuisine.' });
+      return;
+    }
+
+    const baseProduct = await prisma.baseProduct.upsert({
+      where:  { id: id ?? '' },
+      create: { ...b, name } as any,
+      update: { ...b, name } as any,
+    });
+    res.json(serializeBaseProduct(baseProduct as unknown as Record<string, unknown>));
+  } catch (e) { next(e); }
+});
+
+learningRoutes.delete('/base-products/:id', requireEditor, async (req, res, next) => {
+  try {
+    await prisma.baseProduct.delete({ where: { id: req.params.id } });
     res.json({ ok: true });
   } catch (e) { next(e); }
 });
