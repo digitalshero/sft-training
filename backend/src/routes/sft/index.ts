@@ -1912,6 +1912,32 @@ sftRoutes.get('/physical-visits', requirePhysicalVisit, async (req, res, next) =
   } catch (e) { next(e); }
 });
 
+// Manual override from SFT Review's "Physical Visit" button: creates a real,
+// persisted visit row for this partner with no visitor details yet, so it
+// lands at status 'eligible' (the model's own default) and shows up on the
+// Physical Visit page's list exactly like an auto-detected eligible partner
+// — admin then assigns a visitor from there via the existing flow. Does not
+// touch the automatic completion-based scan above at all; it only adds one
+// more way a real visit row can come to exist, which that scan already knows
+// how to skip re-detecting (same as any other existing visit row today).
+sftRoutes.post('/physical-visits/manual-eligible', requirePhysicalVisit, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { user_id, course_id } = req.body as { user_id?: string; course_id?: string };
+    if (!user_id || !course_id) { res.status(400).json({ error: 'user_id and course_id are required' }); return; }
+
+    const existing = await prisma.lpPhysicalVisit.findFirst({
+      where: { userId: user_id, courseId: course_id },
+      orderBy: { createdAt: 'desc' },
+    });
+    if (existing) { res.json({ id: existing.id, already: true }); return; }
+
+    const visit = await prisma.lpPhysicalVisit.create({
+      data: { userId: user_id, courseId: course_id, attemptNo: 1 },
+    });
+    res.status(201).json({ id: visit.id, already: false });
+  } catch (e) { next(e); }
+});
+
 sftRoutes.post('/physical-visits/:id/assign', requirePhysicalVisit, async (req: Request, res: Response, next: NextFunction) => {
   try {
     const actorId = (req as AuthRequest).user.id;

@@ -1,10 +1,11 @@
 import { useMemo, useState } from "react";
-import { useNavigate } from "@tanstack/react-router";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { toast } from "sonner";
 import {
   listReviewPartners,
   type ReviewPartnerRow,
 } from "@/lib/learning/learning.functions";
+import { markPhysicalVisitEligible } from "@/lib/sft/physical-visit.functions";
 import {
   Card,
   CardContent,
@@ -39,7 +40,6 @@ type ReviewRow = ReviewPartnerRow & { visit_status?: string | null };
 
 export function ReviewQueue({ courseId }: { courseId?: string }) {
   const qc = useQueryClient();
-  const navigate = useNavigate();
   const fnList = listReviewPartners;
   const [q, setQ] = useState("");
   const [statusFilter, setStatusFilter] = useState<string>("all");
@@ -48,6 +48,23 @@ export function ReviewQueue({ courseId }: { courseId?: string }) {
   const query = useQuery({
     queryKey: ["lp-review-partners", courseId ?? "all"],
     queryFn: () => fnList({ courseId }),
+  });
+
+  // Manual override — does not open the assign form. It just makes the
+  // partner show up as a real "eligible" card on the Physical Visit page,
+  // same as an auto-detected one; admin assigns a visitor from there.
+  const markEligible = useMutation({
+    mutationFn: (vars: { user_id: string; course_id: string }) =>
+      markPhysicalVisitEligible(vars),
+    onSuccess: (res) => {
+      toast.success(
+        res.already
+          ? "Partner is already on the Physical Visit page"
+          : "Partner marked eligible — see them on the Physical Visit page",
+      );
+      qc.invalidateQueries({ queryKey: ["physical-visits"] });
+    },
+    onError: (e: Error) => toast.error(e.message),
   });
 
   const rows = useMemo(() => {
@@ -266,15 +283,11 @@ export function ReviewQueue({ courseId }: { courseId?: string }) {
                             <Button
                               size="sm"
                               variant="outline"
+                              disabled={markEligible.isPending}
                               onClick={() =>
-                                navigate({
-                                  to: "/sft-training/physical-visit/assign/$visitId",
-                                  params: { visitId: `eligible-${r.user_id}` },
-                                  search: {
-                                    course_id: r.course_id,
-                                    partner_name: r.recipient_name,
-                                    partner_email: r.recipient_email,
-                                  },
+                                markEligible.mutate({
+                                  user_id: r.user_id!,
+                                  course_id: r.course_id,
                                 })
                               }
                             >

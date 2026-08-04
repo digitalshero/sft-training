@@ -104,6 +104,11 @@ export const getMyPhysicalVisit = (): Promise<PhysicalVisitRow | null> =>
   api.get("/partner/my-physical-visit").then((r) => r.data);
 export const assignVisitor = (d: { id: string } & Record<string, unknown>) =>
   api.post(`/sft/physical-visits/${d.id}/assign`, d).then((r) => r.data);
+export const markPhysicalVisitEligible = (d: {
+  user_id: string;
+  course_id: string;
+}): Promise<{ id: string; already: boolean }> =>
+  api.post("/sft/physical-visits/manual-eligible", d).then((r) => r.data);
 export const resendVisitEmails = (d: { id: string; target?: string }) =>
   api.post(`/sft/physical-visits/${d.id}/resend-emails`, d).then((r) => r.data);
 export const getVisitorPortalData = (d: { token: string }): Promise<VisitorPortalData> =>
